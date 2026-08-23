@@ -1,0 +1,41 @@
+[project]
+name = "fxa-lite"
+version = "0.1.0"
+description = "A slim, self-hosted Mozilla Accounts + Sync stack: one process, one SQLite file"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [
+    { name = "Jona JOACHIM", email = "jona@joachim.cc" }
+]
+dependencies = [
+    "cryptography>=46",
+    "fastapi>=0.120",
+    "uvicorn[standard]>=0.38",
+]
+
+[project.scripts]
+fxa-lite = "fxa_lite.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.29,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.4",
+    "ty>=0.0.74",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

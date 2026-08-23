@@ -1,1 +1,16 @@
 resources
+
+# Python
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Local deployment state — config, database, signing keys
+fxa.toml
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+signing-key.json
+retired-key.json

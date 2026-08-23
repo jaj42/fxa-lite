@@ -59,6 +59,7 @@ sign/verify, and JWE compact ECDH-ES we implement ourselves** (~120 lines total)
 
 ```
 pyproject.toml            # uv-managed; [project.scripts] fxa-lite = "fxa_lite.cli:main"
+fxa.example.toml          # annotated config template; copy to fxa.toml (gitignored)
 src/fxa_lite/
   cli.py                  # `serve`, `account add|list|remove`, `keygen`
   config.py               # TOML -> dataclass; public_url, listen, jwks paths, token TTLs
@@ -79,7 +80,8 @@ src/fxa_lite/
   tokenserver/
   syncstorage/
 tests/
-  vectors/                # KATs transcribed from the reference *.spec.ts files
+  vectors/                # KATs transcribed from the reference *.spec.ts files,
+                          #   plus signing-key.pem, the fixed RSA key behind the kid KAT
   conformance/client.py   # Python port of fxa-auth-client (crypto.ts + hawk.ts + bearer.ts)
   test_*.py
 ```
@@ -175,11 +177,34 @@ Seed this client plus Fenix `a2270f727f45f648` and iOS `1b1a3e44c54fbb58` from c
 
 Each phase ends green before the next starts.
 
-### Phase 0 — scaffolding
+### Phase 0 — scaffolding ✅ done
 `uv init --package --python 3.12`, then `uv add fastapi "uvicorn[standard]" cryptography` and
 `uv add --dev pytest pytest-asyncio httpx ruff ty`. Config dataclass reading TOML
 (`tomllib`, stdlib). `fxa-lite keygen` writes the RSA-2048 signing JWK, using the reference kid
 convention `YYYYMMDD-<sha256(pubkey_pem)[:8]>`.
+
+As built:
+
+- `config.py` — frozen dataclasses, unknown keys rejected (a typo must fail, not silently
+  default). `public_url` validated as an absolute http(s) URL and stored without its trailing
+  slash; paths relative to the config file resolve against its directory, so config + SQLite +
+  signing key move as a unit. Sections: `[listen]` host/port, `[paths]` database/signing_key/
+  retired_key, `[ttl]` access_token (21600 — at or below fxa-shared's
+  `SHORT_ACCESS_TTL_TOKEN_IN_MS`, which is what keeps access tokens out of a server-side store),
+  authorization_code (900, `oauthServer.expiration.code`), tokenserver_token (3600,
+  syncstorage-rs `token_duration`), plus `tokenserver_shared_secret`. Example in
+  `fxa.example.toml`.
+- `crypto/jose.py` — so far only the JWK half (base64url, minimal big-endian JWK integers,
+  RSA-2048 keygen, `key_id`, private/public JWK conversion). JWT and JWE follow in phase 1.
+- `cli.py` — `keygen [-c fxa.toml] [-o PATH] [--force]`; writes the private JWK 0600 through a
+  temp-file rename and refuses to clobber an existing key.
+- The kid convention is the **OAuth** one, `lib/oauth/keys.ts:generatePrivateKey`: sha256 over the
+  **PKCS#1** public PEM (`-----BEGIN RSA PUBLIC KEY-----`, trailing newline included), and the JWK
+  also carries `alg: RS256`, `use: sig`, `fxa-createdAt` floored to the hour. `scripts/gen_keys.js`
+  has a different, older convention (`YYYY-MM-DD-<sha256(n||e)[:32]>`) for the retired BrowserID
+  key — not ours.
+- Verified: `tests/test_jose.py` pins the kid against `tests/vectors/signing-key.pem`, with the
+  expected fingerprint and the modulus produced by `openssl`, not by our own encoder.
 
 ### Phase 1 — crypto core, test-first
 Implement `crypto/` and validate against KATs transcribed from:

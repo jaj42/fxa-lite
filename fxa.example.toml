@@ -1,0 +1,29 @@
+# fxa-lite configuration.
+#
+# Relative paths are resolved against the directory holding this file.
+
+# The origin Firefox is pointed at via identity.fxaccounts.autoconfig.uri.
+# Everything — accounts API, OAuth, profile, sign-in page, tokenserver and sync
+# storage — is served below it.
+public_url = "http://localhost:9000"
+
+# HMAC secret shared by the tokenserver and sync storage tiers. Any long random
+# string; changing it invalidates outstanding sync tokens (clients re-fetch).
+# tokenserver_shared_secret = "change-me"
+
+[listen]
+host = "127.0.0.1"
+port = 9000
+
+[paths]
+database = "fxa.sqlite"
+signing_key = "signing-key.json"
+# Public JWK of a retired signing key, kept in /v1/jwks so tokens signed before
+# a rotation still verify.
+# retired_key = "retired-key.json"
+
+[ttl]
+# Seconds. access_token stays at or below 6h so tokens need no server-side store.
+access_token = 21600
+authorization_code = 900
+tokenserver_token = 3600
