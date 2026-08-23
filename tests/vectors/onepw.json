@@ -1,0 +1,29 @@
+{
+  "source": [
+    "packages/fxa-auth-client/test/crypto.ts (getCredentials, getCredentialsV2, unbundleKeyFetchResponse)",
+    "packages/fxa-auth-server/lib/crypto/scrypt.spec.ts"
+  ],
+  "credentials": [
+    {
+      "name": "v1",
+      "version": 1,
+      "email": "andré@example.org",
+      "password": "pässwörd",
+      "auth_pw": "247b675ffb4c46310bc87e26d712153abe5e1c90ef00a4784594f97ef54f2375",
+      "unwrap_b_key": "de6a2648b78284fcb9ffa81ba95803309cfba7af583c01a8a1a63e567234dd28"
+    },
+    {
+      "name": "v2",
+      "version": 2,
+      "client_salt": "0123456789abcdef0123456789abcdef",
+      "password": "pässwörd",
+      "auth_pw": "d278c764bd1852a14bfc4e9d8c1682b4f1a57edb9a9372bf8c370cc41592155b",
+      "unwrap_b_key": "616616095eff30032abf6a47df30d9a3fc799d8af5e8519905c1601170553493"
+    }
+  ],
+  "scrypt": {
+    "auth_pw": "f84913e3d8e6d624689d0a3e9678ac8dcc79d2c2f3d9641488cd9d6ef6cd83dd",
+    "auth_salt_text": "identity.mozilla.com/picl/v1/scrypt",
+    "stretched": "5b82f146a64126923e4167a0350bb181feba61f63cb1714012b19cb0be0119c5"
+  }
+}

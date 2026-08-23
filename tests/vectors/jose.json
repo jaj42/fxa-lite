@@ -1,0 +1,38 @@
+{
+  "source": [
+    "RFC 7518 appendix C (ECDH-ES key agreement computation)",
+    "RFC 7516 appendix A.1 (A256GCM content encryption)"
+  ],
+  "ecdh_es": {
+    "name": "rfc7518-appendix-c",
+    "sender_private_jwk": {
+      "kty": "EC",
+      "crv": "P-256",
+      "x": "gI0GAILBdu7T53akrFmMyGcsF3n5dO7MmwNBHKW5SV0",
+      "y": "SLW_xSffzlPWrHEVI30DHM_4egVwt3NQqeUD7nMFpps",
+      "d": "0_NxaRPUMQoAJt50Gz8YiTr8gRTwyEaCumd-MToTmIo"
+    },
+    "recipient_public_jwk": {
+      "kty": "EC",
+      "crv": "P-256",
+      "x": "weNJy2HscCSM6AEDTDg04biOvhFhyyWvOHQfeF_PxMQ",
+      "y": "e8lnCO-AlStT-NJVX-crhB7QRYhiix03illJOVAOyck"
+    },
+    "shared_secret": "9e56d91d817135d372834283bf84269cfb316ea3da806a48f6daa7798cfe90c4",
+    "algorithm_id": "A128GCM",
+    "apu": "Alice",
+    "apv": "Bob",
+    "key_length": 16,
+    "derived_key": "VqqN6vgjbSBcIijNcacQGg"
+  },
+  "a256gcm": {
+    "name": "rfc7516-appendix-a1",
+    "protected_header": { "alg": "RSA-OAEP", "enc": "A256GCM" },
+    "protected_b64u": "eyJhbGciOiJSU0EtT0FFUCIsImVuYyI6IkEyNTZHQ00ifQ",
+    "cek": "b1a1f480548fe1733fb403ff6b9ad4f68a076e5b702e22692f82cb2e7aea40fc",
+    "iv": "e3c575fc02dbe944b4e14ddb",
+    "plaintext": "The true sign of intelligence is not knowledge but imagination.",
+    "ciphertext": "5eym8TW_c8SuK0ltJ3rpYIzOeDQz7TALvtu6UG9oMo4vpzs9tX_EFShS8iB7j6jiSdiwkIr3ajwQzaBtQD_A",
+    "tag": "XFBoMYUZodetZdvTiFvSkQ"
+  }
+}

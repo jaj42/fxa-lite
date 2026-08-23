@@ -1,0 +1,45 @@
+{
+  "source": "libs/vendored/crypto-relier/src/lib/deriver/scoped-keys.spec.ts",
+  "keys": [
+    {
+      "name": "notes",
+      "scope": "https://identity.mozilla.com/apps/notes",
+      "kb": "bc3851e9e610f631df94d7883d5defd5e5f55ab520bd5a9ae33dae26575c6b1a",
+      "key_rotation_secret": "0000000000000000000000000000000000000000000000000000000000000000",
+      "key_rotation_timestamp": 1494446722583,
+      "uid": "aeaa1725c7a24ff983c6295725d5fc9b",
+      "k": "b9SaftekqPfXDOEeZx8714ktkcG9mBbNnKIyoUmhShE",
+      "kid": "1494446723-sXWpWP2sQkP-KsjIPGm1gg"
+    },
+    {
+      "name": "app-key-with-rotation-secret",
+      "scope": "app_key:https%3A//example.com",
+      "kb": "8b2e1303e21eee06a945683b8d495b9bf079ca30baa37eb8392d9ffa4767be45",
+      "key_rotation_secret": "517d478cb4f994aa69930416648a416fdaa1762c5abf401a2acf11a0f185e98d",
+      "key_rotation_timestamp": 1510726317000,
+      "uid": "aeaa1725c7a24ff983c6295725d5fc9b",
+      "k": "Kkbk1_Q0oCcTmggeDH6880bQrxin2RLu5D00NcJazdQ",
+      "kid": "1510726317-Voc-Eb9IpoTINuo9ll7bjA"
+    },
+    {
+      "name": "oldsync",
+      "scope": "https://identity.mozilla.com/apps/oldsync",
+      "kb": "eaf9570b7219a4187d3d6bf3cec2770c2e0719b7cc0dfbb38243d6f1881675e9",
+      "key_rotation_secret": "0000000000000000000000000000000000000000000000000000000000000000",
+      "key_rotation_timestamp": 1510726317123,
+      "uid": "aeaa1725c7a24ff983c6295725d5fc9b",
+      "k": "DW_ll5GwX6SJ5GPqJVAuMUP2t6kDqhUulc2cbt26xbTcaKGQl-9l29FHAQ7kUiJETma4s9fIpEHrt909zgFang",
+      "kid": "1510726317123-IqQv4onc7VcVE1kTQkyyOw"
+    },
+    {
+      "name": "thunderbird-sync",
+      "scope": "https://identity.thunderbird.net/apps/sync",
+      "kb": "eaf9570b7219a4187d3d6bf3cec2770c2e0719b7cc0dfbb38243d6f1881675e9",
+      "key_rotation_secret": "0000000000000000000000000000000000000000000000000000000000000000",
+      "key_rotation_timestamp": 1715043913541,
+      "uid": "aeaa1725c7a24ff983c6295725d5fc9b",
+      "k": "DW_ll5GwX6SJ5GPqJVAuMUP2t6kDqhUulc2cbt26xbTcaKGQl-9l29FHAQ7kUiJETma4s9fIpEHrt909zgFang",
+      "kid": "1715043913541-IqQv4onc7VcVE1kTQkyyOw"
+    }
+  ]
+}
