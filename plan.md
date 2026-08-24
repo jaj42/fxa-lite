@@ -790,19 +790,76 @@ its `sessionTokenId` and its `refreshTokenId` — so one browser is one row rath
 - `UPSTREAM.toml` gained `lib/routes/attached-clients.{js,spec.ts}` and
   `packages/fxa-shared/connected-services`. 743 tests, `ruff check` and `ty check` clean.
 
+**`POST /v1/account/devices/notify` is done, and it answers 403.** The question was what a server
+with no push should say; both candidate answers turned out to be upstream's own, and the trace's
+premise ("a 404 leaves Firefox retrying") turned out to be wrong — the caller does not retry, or
+even wait.
+
+- What the route is *for*: after uploading the `clients` collection Sync asks the server to wake
+  every other device so it picks the change up sooner
+  (`clients.sys.mjs:_notifyCollectionChanged` → `FxAccountsClient.notifyDevices`). The promise is
+  deliberately not awaited and its rejection is logged, so no answer here can break a sync.
+  **Send Tab does not come through this route**: current Firefox delivers commands with
+  `POST /account/devices/invoke_command` and the target *polls* `/account/device/commands` — push
+  is only the nudge. That is the route to implement if Send Tab is ever in scope, and it can be
+  honest about it, because its response reports `enqueued` and `notified` separately.
+- Upstream answers `200 {}` when notifications are on — *including* when `push.sendPush` throws,
+  which it catches and logs — and 403/errno 202 when `deviceNotificationsEnabled` is false. So a
+  200 is not a lie the protocol can detect (the response schema is the empty object and claims
+  nothing about delivery), but it is still a lie, and the 403 is a description of fxa-lite that
+  happens to be exactly true. errno 202 is in the client's own table
+  (`auth-errors.js: FEATURE_NOT_ENABLED`) where a 404's errno 116 is only "unknown endpoint". The
+  one asymmetry: upstream's switch is temporary by design ("in case problems with the client logic
+  cause server overload"); ours is permanent.
+- **Which is why the answer must not carry `retryAfter`, and this is the finding worth keeping.**
+  Upstream's `featureNotEnabled` puts `retryAfter: 30` in the body *and* a `Retry-After` header.
+  Both are load-bearing in Firefox: `HawkClient._constructError` reads the header and notifies
+  `fxaccounts:backoff:interval` on any status, and `hawkclient.request` throws the parsed body
+  whenever it carries an `error` key — which this envelope always does — so
+  `FxAccountsClient._request` caches it as `backoffError` and rejects **every** FxA request until
+  the timer expires. Firefox notifies on every sync, so a permanent 403 spelled upstream's way
+  would have stalled the whole account client on a timer that never stops being refreshed.
+  `errors.feature_not_enabled` now defaults `retry_after` to `None`, with the reasoning at the
+  factory rather than at the one call site.
+- The payload is validated first, as it is upstream (hapi validates before the handler runs), so a
+  client bug reads as one instead of as a disabled feature. Both joi alternatives are kept,
+  including the rule that `excluded` belongs only to the `to: "all"` branch. The `payload` object
+  is not validated against `docs/pushpayloads.schema.json`: that schema describes what a
+  *delivered* push may contain, and nothing here delivers one.
+- **A provenance gap this opened, which phase 7's rules cannot yet close.** Three of the facts
+  above are about the *browser*, not the server — `services/sync/modules/engines/clients.sys.mjs`,
+  `services/fxaccounts/FxAccountsClient.sys.mjs` and `services/common/hawkclient.sys.mjs` — and
+  they were read at `mozilla/gecko-dev` HEAD on 2026-08-24, unpinned, because there is no
+  mozilla-central checkout under `resources/` and cloning one to read three files is not a trade
+  worth making. `UPSTREAM.toml` therefore does not describe them. Every phase-8 finding so far
+  came from a packet trace, which is its own evidence; these came from a reading, which is not. If the
+  browser side is read again for anything load-bearing, a sixth entry — sparse, on those three
+  paths — is the honest fix.
+- `UPSTREAM.toml` gained `devices-and-sessions.spec.ts` and `packages/fxa-auth-server/config/index.ts`
+  (read narrowly, for what `deviceNotificationsEnabled` *means*), and the `mozilla/fxa` pin moved
+  to `f87b36d0` (2026-08-24). Widening the path list is what raised the diff, and it answers to
+  nothing: across every path fxa-lite reads, the only change since `b522aa57` is the removal of a
+  mailer config key and the `canSend` flag behind it. There is no mailer here.
+
+**`/favicon.ico` no longer 404s.** The shell now names an icon in a `<link>`, which is what stops
+the browser asking for the well-known path at all, and the path is served too — as SVG, since the
+extension is a convention and the `Content-Type` is the declaration. Cosmetic, but the log is the
+instrument this phase is read with, and a 404 in it should mean something.
+
+755 tests, `ruff check` and `ty check` clean.
+
 **Still to do, in the order that makes sense:**
 
-1. `POST /v1/account/devices/notify`, called right after the clients collection is uploaded. Push
-   and Send Tab are deliberately out of scope, so the question is what a server without them
-   should *answer* — a 404 leaves Firefox retrying, and answering 200 to a notification that will
-   never be delivered is a lie the client cannot detect. Establish which upstream considers
-   correct before implementing either.
-2. Re-run the desktop pass on a **fresh profile** against a clean database. Everything above was
+1. Re-run the desktop pass on a **fresh profile** against a clean database. Everything above was
    observed on a profile that had already failed several sign-ins, so the happy path has been
    seen in recovery, not from zero. This is also what confirms `attached_clients`: answering 200
    is not the same as Firefox being satisfied with what is in the answer, and the trace is the
-   only place that shows the difference.
-3. The Fenix half, which has not been started and which needs TLS first (see the secure-context
+   only place that shows the difference. The two `GET /storage/meta/global` 404s at the top of a
+   first sync are not a defect and should stay: an absent BSO is Weave code 0, and Firefox reads
+   the 404 as "this is a fresh server", wipes it and uploads `meta/global` and `crypto/keys`. It
+   asks twice because `_remoteSetup` re-fetches after `_freshStart`. On the fresh-profile run the
+   whole pair should appear once and never again.
+2. The Fenix half, which has not been started and which needs TLS first (see the secure-context
    finding above). The four questions at the top of this phase remain open, and so does iOS.
 
 ### Phase 9 — harden `crypto/jose.py` ✅ done

@@ -20,7 +20,7 @@ from fastapi import APIRouter, Query, Request
 from .. import accounts, errors
 from ..db import Database, Device
 from .credentials import Session, SessionCredentials, database
-from .models import DeviceDestroy, DeviceRegistration
+from .models import DeviceDestroy, DeviceRegistration, DevicesNotify
 from .user_agent import parse, synthesize_name
 
 router = APIRouter(tags=["devices"])
@@ -98,6 +98,39 @@ def device_destroy(
     if db.delete_device(credentials.account.uid, payload.id) is None:
         raise errors.unknown_device()
     return {}
+
+
+@router.post("/account/devices/notify")
+def devices_notify(payload: DevicesNotify, credentials: Session) -> dict[str, Any]:
+    """Firefox's "the clients collection changed" nudge — answered 403/202.
+
+    Sync sends this after uploading the `clients` collection, asking the server
+    to push every *other* device awake so it picks the change up sooner
+    (`clients.sys.mjs:_notifyCollectionChanged`). There is no push service here,
+    so nothing can be woken.
+
+    Both plausible answers are upstream's own, and the choice between them is
+    which sentence is true of fxa-lite. `deviceNotificationsEnabled = false`
+    answers 403/errno 202, and upstream's handler returns `200 {}` — even when
+    `push.sendPush` throws, which it catches and logs. So a 200 is not a lie the
+    protocol can detect (the response schema is the empty object; it claims
+    nothing about delivery), but it is still a lie, and fxa-lite is exactly the
+    deployment the 403 describes: device-driven notifications are off, and here
+    permanently rather than as a safety switch. errno 202 is in the client's own
+    error table (`auth-errors.js: FEATURE_NOT_ENABLED`), where a 404's errno 116
+    is only "unknown endpoint".
+
+    Nothing breaks either way: the caller does not await the promise and logs
+    the rejection. What would break is a `retryAfter` on the answer — see
+    `errors.feature_not_enabled`.
+
+    Send Tab does not come through here. Current Firefox delivers commands with
+    `POST /account/devices/invoke_command` and the target *polls*
+    `/account/device/commands`; push is only the nudge. That is the route to
+    implement if Send Tab is ever in scope, and it can be honest about delivery
+    because its response carries `enqueued` and `notified` separately.
+    """
+    raise errors.feature_not_enabled()
 
 
 def _merge(

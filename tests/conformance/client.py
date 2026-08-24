@@ -479,6 +479,11 @@ class AuthClient:
     async def devices(self, session_token: str) -> Any:
         return await self.authed("GET", "/account/devices", session_token, "sessionToken")
 
+    async def devices_notify(self, session_token: str, payload: dict[str, Any]) -> Any:
+        return await self.authed(
+            "POST", "/account/devices/notify", session_token, "sessionToken", payload
+        )
+
     async def device_destroy(self, session_token: str, device_id: str) -> Any:
         return await self.authed(
             "POST", "/account/device/destroy", session_token, "sessionToken", {"id": device_id}

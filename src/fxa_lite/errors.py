@@ -159,7 +159,24 @@ def request_body_too_large() -> FxaError:
     )
 
 
-def feature_not_enabled(retry_after: int = 30) -> FxaError:
+def feature_not_enabled(retry_after: int | None = None) -> FxaError:
+    """403 for a feature this deployment does not run.
+
+    **`retryAfter` defaults to absent here, where upstream defaults to 30** —
+    and upstream also sets a `Retry-After` header. Both are load-bearing in
+    Firefox and neither is safe on an answer that will never change:
+    `HawkClient._constructError` reads the header and, on any status, notifies
+    `fxaccounts:backoff:interval`; and when the body carries an `error` key —
+    which this envelope always does — `hawkclient.request` throws the parsed
+    body itself, so `FxAccountsClient._request` sees `error.retryAfter`, caches
+    it as `backoffError` and rejects *every* FxA request for that many seconds.
+    A feature that is permanently off would therefore stall the whole account
+    client on a timer, refreshed each time the client asked again.
+
+    Upstream can afford both because `deviceNotificationsEnabled` is a safety
+    switch it expects to flip back ("in case problems with the client logic
+    cause server overload"); fxa-lite's features are off by construction.
+    """
     return FxaError(
         code=403,
         errno=Errno.FEATURE_NOT_ENABLED,

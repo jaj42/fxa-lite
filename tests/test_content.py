@@ -128,3 +128,16 @@ def test_every_asset_on_disk_is_served() -> None:
     """A file added to `assets/` but not to the table is a 404 nobody notices."""
     on_disk = {path.name for path in Path(content.ASSET_DIR).iterdir() if path.is_file()}
     assert on_disk == {*ASSET_NAMES, "index.html"}
+
+
+async def test_the_favicon_is_served(http) -> None:
+    """A browser asks for `/favicon.ico` without being told to; the shell names
+    its icon in a `<link>`, and the well-known path answers too rather than
+    writing a 404 to the log on every navigation that misses the link."""
+    assert '<link rel="icon" href="/static/icon.svg"' in content.SHELL.body.decode()
+
+    response = await http.get("/favicon.ico")
+    assert response.status_code == 200
+    # The extension is a convention; the Content-Type is the declaration.
+    assert response.headers["content-type"] == "image/svg+xml"
+    assert response.content == content.STATIC["icon.svg"].body

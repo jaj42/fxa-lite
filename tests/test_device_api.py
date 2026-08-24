@@ -145,3 +145,98 @@ async def test_zero_length_capabilities_array_is_tolerated(bearer_client: AuthCl
         account["sessionToken"], {"name": "Laptop", "capabilities": []}
     )
     assert "capabilities" not in device
+
+
+#: What Firefox sends after uploading the `clients` collection:
+#: `clients.sys.mjs:_notifyCollectionChanged` through
+#: `FxAccountsClient.notifyDevices`, which always sets `TTL` and names the local
+#: device in `excluded` when `to` is `all`. This is the request that answered
+#: 404 in the phase 8 trace.
+COLLECTION_CHANGED = {
+    "to": "all",
+    "excluded": ["c" * 32],
+    "payload": {
+        "version": 1,
+        "command": "sync:collection_changed",
+        "data": {"collections": ["clients"], "reason": "firstsync"},
+    },
+    "TTL": 0,
+}
+
+
+async def test_devices_notify_is_refused_as_a_feature_this_server_lacks(
+    bearer_client: AuthClient,
+) -> None:
+    """403/errno 202, which is upstream's own answer for a server with
+    `deviceNotificationsEnabled = false` — true here permanently."""
+    account = await bearer_client.sign_up(EMAIL, PASSWORD)
+    with pytest.raises(ClientError) as caught:
+        await bearer_client.devices_notify(account["sessionToken"], COLLECTION_CHANGED)
+    assert caught.value.status == 403
+    assert caught.value.errno == 202
+
+
+async def test_devices_notify_never_asks_the_client_to_back_off(
+    bearer_client: AuthClient,
+) -> None:
+    """The assertion this route exists to keep.
+
+    `hawkclient.request` throws the parsed body whenever it carries `error`, and
+    `FxAccountsClient._request` caches any error with a `retryAfter` as
+    `backoffError` — rejecting *every* FxA request until the timer expires.
+    `HawkClient._constructError` does the same from a `Retry-After` header, on
+    any status. Firefox notifies on every sync, so either one would stall the
+    account client on a permanently repeating timer.
+    """
+    account = await bearer_client.sign_up(EMAIL, PASSWORD)
+    response = await bearer_client.http.post(
+        "/v1/account/devices/notify",
+        json=COLLECTION_CHANGED,
+        headers=bearer_client.authorization(account["sessionToken"], "sessionToken"),
+    )
+    assert response.status_code == 403
+    assert "retryAfter" not in response.json()
+    assert "retry-after" not in response.headers
+
+
+async def test_devices_notify_needs_a_session(bearer_client: AuthClient) -> None:
+    """The credential is checked before the feature is: a 403 is a statement
+    about this server, and an anonymous caller is owed nothing but 110."""
+    with pytest.raises(ClientError) as caught:
+        await bearer_client.devices_notify("a" * 64, COLLECTION_CHANGED)
+    assert caught.value.errno == 110
+
+
+async def test_devices_notify_to_a_list_of_devices(bearer_client: AuthClient) -> None:
+    """The schema's other alternative — Send Tab's shape, on older clients."""
+    account = await bearer_client.sign_up(EMAIL, PASSWORD)
+    with pytest.raises(ClientError) as caught:
+        await bearer_client.devices_notify(
+            account["sessionToken"],
+            {"to": ["d" * 32], "payload": {"version": 1, "command": "fxaccounts:logout"}},
+        )
+    assert caught.value.errno == 202
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # `excluded` is not a key of the alternative that names devices.
+        {"to": ["d" * 32], "excluded": ["c" * 32], "payload": {}},
+        {"to": "everyone", "payload": {}},
+        {"to": "all", "payload": {}, "TTL": -1},
+        {"to": "all", "payload": {}, "_endpointAction": "somethingElse"},
+        {"to": "all"},
+        {"to": "all", "payload": {}, "typo": True},
+    ],
+)
+async def test_devices_notify_rejects_a_malformed_payload(
+    bearer_client: AuthClient, payload: dict
+) -> None:
+    """Validation happens before the feature check, as it does upstream: a
+    client bug should read as one rather than as a disabled feature."""
+    account = await bearer_client.sign_up(EMAIL, PASSWORD)
+    with pytest.raises(ClientError) as caught:
+        await bearer_client.devices_notify(account["sessionToken"], payload)
+    assert caught.value.status == 400
+    assert caught.value.errno in (107, 108)

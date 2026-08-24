@@ -65,6 +65,7 @@ _MEDIA_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
+    ".svg": "image/svg+xml",
 }
 
 
@@ -88,7 +89,8 @@ def _load(name: str) -> Asset:
 
 SHELL = _load("index.html")
 STATIC: dict[str, Asset] = {
-    name: _load(name) for name in ("app.js", "api.js", "crypto.js", "webchannel.js", "style.css")
+    name: _load(name)
+    for name in ("app.js", "api.js", "crypto.js", "webchannel.js", "style.css", "icon.svg")
 }
 
 router = APIRouter(tags=["content"])
@@ -141,6 +143,20 @@ def oauth_success(client_id: str) -> Response:
     at all — a registered redirect that 404s strands the flow on an error page.
     """
     return _shell_response()
+
+
+@router.get("/favicon.ico", include_in_schema=False)
+def favicon(request: Request) -> Response:
+    """The one URL a browser requests without being told to.
+
+    The shell names its icon with a `<link>`, so a page load does not come
+    here; a request that does arrive is for some other path on this origin —
+    an API URL opened in a tab, or a browser that asks anyway — and answering
+    it is cheaper than the 404 it would otherwise write to the log. The
+    extension is a convention, not a declaration: the icon is served as SVG,
+    which is what the `Content-Type` says.
+    """
+    return static_asset("icon.svg", request)
 
 
 @router.get("/static/{name}", include_in_schema=False)

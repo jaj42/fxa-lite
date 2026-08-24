@@ -8,9 +8,16 @@ payload the reference would reject must not sneak through.
 from __future__ import annotations
 
 import re
-from typing import Annotated
+from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 
 #: `validators.HEX_STRING` applied to a 32-byte value.
 Hex64 = Annotated[str, StringConstraints(pattern=r"^[a-fA-F0-9]{64}$")]
@@ -127,3 +134,33 @@ class DeviceRegistration(Payload):
 
 class DeviceDestroy(Payload):
     id: Hex32
+
+
+class DevicesNotify(Payload):
+    """`/account/devices/notify`, whose joi schema is two alternatives.
+
+    `to` is either the string `all` — in which case `excluded` may name devices
+    to skip — or an explicit list of device ids, in which case `excluded` is not
+    a key of that alternative at all and so is rejected.  Firefox never sends
+    both (`FxAccountsClient.notifyDevices` throws first), which is what makes
+    the rule cheap to keep.
+
+    The `payload` object is validated against `docs/pushpayloads.schema.json`
+    upstream; that is a schema about what a *delivered* push may contain, and
+    nothing here delivers one, so it is left as an object.
+    """
+
+    to: Literal["all"] | list[Hex32]
+    payload: dict[str, Any]
+    TTL: int | None = Field(default=None, ge=0)
+    excluded: list[Hex32] | None = None
+    #: Leading underscores are private in pydantic, so this one arrives by alias.
+    endpointAction: Literal["accountVerify"] | None = Field(
+        default=None, alias="_endpointAction"
+    )
+
+    @model_validator(mode="after")
+    def _excluded_only_with_all(self) -> DevicesNotify:
+        if self.excluded is not None and self.to != "all":
+            raise ValueError("excluded is only valid when to is 'all'")
+        return self
