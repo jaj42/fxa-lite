@@ -5,15 +5,25 @@ beats taking on `pyjwt` + `jwcrypto`:
 
 * **JWK conversion and signing-key generation**, for `/v1/jwks`.
 * **RS256 JWTs**, the format of OAuth access tokens (`lib/oauth/jwt_access_token.js`).
-* **Compact JWE**, two flavours. `ECDH-ES` + `A256GCM` to an ephemerally-agreed
-  key is how scoped keys reach the relier (`deriver-utils.ts` — we are the
-  encrypting side and never see the private half); `dir` + `A256GCM` is what
-  `fxa-auth-client`'s `jweDecrypt` speaks.
+* **Compact JWE**, `ECDH-ES` + `A256GCM`: how scoped keys reach the relier
+  (`deriver-utils.ts`). On the wire we are neither side of this — the browser
+  seals the `keys_jwe` and the relier opens it, and the auth server only stores
+  the blob — so both halves here exist as the oracle that
+  `content/assets/crypto.js` is checked against, and are held to the same
+  standard anyway because that JS ships to a browser.
 
 Key generation mirrors `packages/fxa-auth-server/lib/oauth/keys.ts`
 (`generatePrivateKey`): RSA-2048, `alg: RS256`, `use: sig`, a `kid` of
 ``YYYYMMDD-<sha256(pkcs1 public pem)[:8]>`` and an `fxa-createdAt` timestamp
 rounded down to the hour.
+
+Every parse path below takes hostile input — `verify_jwt` runs on the
+`Authorization:` header of the tokenserver, the profile server and
+`/v1/verify` — so each is bounded on purpose: a length cap before anything is
+decoded, exactly one algorithm accepted rather than an allow-list the next edit
+can widen, and exactly one exception type on the way out. Anything other than
+`JWTError` or `JWEError` escaping is a bug, and
+`tests/test_jose_properties.py` asserts that over arbitrary input.
 """
 
 from __future__ import annotations
@@ -22,6 +32,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import struct
 import time
 from collections.abc import Mapping
@@ -44,6 +55,19 @@ IV_LENGTH = 12
 TAG_LENGTH = 16
 CEK_LENGTH = 32
 
+#: Longest JWT we will look at. Our own access tokens run ~700 bytes; the cap
+#: exists so an unauthenticated `Authorization:` header cannot make us
+#: base64-decode and JSON-parse a megabyte before a signature has been checked.
+MAX_JWT_LENGTH = 8 * 1024
+#: Longest JWE we will open, and the largest protected header inside one.
+#: `python-jose` caps at 250 KiB for the same reason; `keys_jwe` is capped at
+#: 8 KiB again at the route (`oauth/models.py`).
+MAX_JWE_LENGTH = 250 * 1024
+MAX_JWE_HEADER_LENGTH = 8 * 1024
+
+#: base64url with optional padding — the alphabet, and nothing else.
+_BASE64URL = re.compile(r"[A-Za-z0-9_-]*={0,2}")
+
 # The private JWK members, in the order pem2jwk emits them.
 _PRIVATE_MEMBERS = ("n", "e", "d", "p", "q", "dp", "dq", "qi")
 
@@ -54,7 +78,15 @@ def b64u_encode(data: bytes) -> str:
 
 
 def b64u_decode(data: str) -> bytes:
-    """base64url, tolerating missing padding."""
+    """base64url, tolerating missing padding, strict about everything else.
+
+    `base64.urlsafe_b64decode` silently discards characters outside the
+    alphabet, so `+` and `/` from a client that reached for standard base64
+    decode to *something* — a plausible-looking key nobody can encrypt to. The
+    tokenserver matches base64url by hand for the same reason.
+    """
+    if not _BASE64URL.fullmatch(data):
+        raise ValueError("not base64url")
     return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
 
 
@@ -182,14 +214,14 @@ def sign_jwt(
 
 
 def decode_jwt_header(token: str) -> dict[str, Any]:
-    """Read the header without verifying anything — only safe for picking a key."""
-    try:
-        header = json.loads(b64u_decode(token.split(".", 1)[0]))
-    except (ValueError, IndexError) as exc:
-        raise JWTError("malformed JWT header") from exc
-    if not isinstance(header, dict):
-        raise JWTError("JWT header is not an object")
-    return header
+    """Read the header without verifying anything — only safe for picking a key.
+
+    This is the one thing we parse before checking a signature, because `kid`
+    and `alg` are how the signature gets checked at all. Hence the length cap:
+    it is the only bound on how much unauthenticated work a request can ask for.
+    """
+    _bounded(token, MAX_JWT_LENGTH, JWTError, "JWT")
+    return _json_object(token.split(".", 1)[0], JWTError, "JWT header")
 
 
 def verify_jwt(
@@ -204,6 +236,7 @@ def verify_jwt(
     Audience, issuer and scope are the caller's business — they differ per route
     and getting them wrong should be a visible decision, not a default.
     """
+    _bounded(token, MAX_JWT_LENGTH, JWTError, "JWT")
     parts = token.split(".")
     if len(parts) != 3:
         raise JWTError(f"expected 3 JWT segments, got {len(parts)}")
@@ -220,29 +253,44 @@ def verify_jwt(
         key = keys
 
     try:
-        key.verify(
-            b64u_decode(parts[2]),
-            f"{parts[0]}.{parts[1]}".encode("ascii"),
-            padding.PKCS1v15(),
-            hashes.SHA256(),
-        )
+        signature = b64u_decode(parts[2])
+        signing_input = f"{parts[0]}.{parts[1]}".encode("ascii")
+    except (ValueError, UnicodeEncodeError) as exc:
+        raise JWTError("JWT is not base64url") from exc
+    try:
+        key.verify(signature, signing_input, padding.PKCS1v15(), hashes.SHA256())
     except InvalidSignature as exc:
         raise JWTError("bad JWT signature") from exc
 
-    try:
-        claims = json.loads(b64u_decode(parts[1]))
-    except ValueError as exc:
-        raise JWTError("malformed JWT payload") from exc
-    if not isinstance(claims, dict):
-        raise JWTError("JWT payload is not an object")
+    # Only now, with the signature checked, do we parse the payload.
+    claims = _json_object(parts[1], JWTError, "JWT payload")
 
-    expires = claims.get("exp")
-    if isinstance(expires, int | float):
+    expires = _numeric_date(claims, "exp")
+    # `iat` is unused here and type-checked anyway: a string `iat` means the
+    # token was not minted by us, and a caller reading it should not have to
+    # rediscover that.
+    _numeric_date(claims, "iat")
+    if expires is not None:
         if now is None:
             now = int(time.time())
         if now >= expires + leeway:
             raise JWTError("JWT has expired")
     return claims
+
+
+def _numeric_date(claims: Mapping[str, Any], name: str) -> float | None:
+    """A JWT time claim is a NumericDate (RFC 7519 §2), or it is absent.
+
+    `bool` is an `int` in Python, so without the first check `exp: true` reads
+    as an expiry one second into 1970 — right answer, wrong reason, and the
+    reason is the sort that survives a refactor.
+    """
+    if name not in claims:
+        return None
+    value = claims[name]
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise JWTError(f"JWT {name} is not a number")
+    return value
 
 
 # --------------------------------------------------------------------------
@@ -279,10 +327,13 @@ def jwk_to_ec_public_key(jwk: Mapping[str, Any]) -> ec.EllipticCurvePublicKey:
     if "d" in jwk:
         raise JWEError("appJwk includes the private key")
     try:
+        # `public_key()` is where an off-curve point dies: `cryptography` runs
+        # the curve equation, which is what makes the invalid-curve attack a
+        # rejection rather than a leak of our ephemeral scalar.
         return ec.EllipticCurvePublicNumbers(
             x=uint_b64u(jwk["x"]), y=uint_b64u(jwk["y"]), curve=ec.SECP256R1()
         ).public_key()
-    except (KeyError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError) as exc:
         raise JWEError("invalid EC public key") from exc
 
 
@@ -348,54 +399,73 @@ def encrypt_jwe_ecdh_es(
     return _seal(header, cek, plaintext)
 
 
-def encrypt_jwe_dir(cek: bytes, plaintext: bytes, *, kid: str | None = None) -> str:
-    """Encrypt under a pre-shared key — `fxa-auth-client`'s `jweEncrypt`."""
-    header: dict[str, Any] = {"enc": CONTENT_ENCRYPTION, "alg": "dir"}
-    if kid is not None:
-        header["kid"] = kid
-    return _seal(header, cek, plaintext)
+def decrypt_jwe(jwe: str, key: ec.EllipticCurvePrivateKey) -> bytes:
+    """Open a compact `ECDH-ES` + `A256GCM` JWE with the recipient's private key.
 
-
-def decrypt_jwe(jwe: str, key: bytes | ec.EllipticCurvePrivateKey) -> bytes:
-    """Open a compact JWE, taking a raw CEK for `dir` or a P-256 private key for ECDH-ES."""
+    Nothing in fxa-lite opens a JWE on the wire; this is the half that lets a
+    test prove what `encrypt_jwe_ecdh_es` and `crypto.js` emit is openable at
+    all. It is written to the same rules as `verify_jwt` regardless, because a
+    parser that is only ever fed friendly input is a parser nobody has checked.
+    """
+    _bounded(jwe, MAX_JWE_LENGTH, JWEError, "JWE")
     parts = jwe.split(".")
     if len(parts) != 5:
         raise JWEError(f"expected 5 JWE segments, got {len(parts)}")
     protected, encrypted_key, iv, ciphertext, tag = parts
-    try:
-        header = json.loads(b64u_decode(protected))
-    except ValueError as exc:
-        raise JWEError("malformed JWE header") from exc
+    _bounded(protected, MAX_JWE_HEADER_LENGTH, JWEError, "JWE protected header")
+
+    header = _json_object(protected, JWEError, "JWE header")
+    if header.get("alg") != "ECDH-ES":
+        raise JWEError(f"unsupported JWE algorithm: {header.get('alg')!r}")
     if header.get("enc") != CONTENT_ENCRYPTION:
         raise JWEError(f"unsupported content encryption: {header.get('enc')!r}")
+    if "zip" in header:
+        raise JWEError(f"unsupported JWE compression: {header['zip']!r}")
+    if "crit" in header:
+        # RFC 7516 §4.1.13 requires us to understand every parameter named
+        # here. We implement no extensions, so the only honest answer is no.
+        raise JWEError("JWE names critical header parameters we do not implement")
+    if encrypted_key:
+        raise JWEError("ECDH-ES direct agreement carries no encrypted key")
 
-    algorithm = header.get("alg")
-    if algorithm == "dir":
-        if not isinstance(key, bytes):
-            raise JWEError("alg=dir needs the content encryption key")
-        cek = key
-    elif algorithm == "ECDH-ES":
-        if isinstance(key, bytes):
-            raise JWEError("alg=ECDH-ES needs an EC private key")
-        if encrypted_key:
-            raise JWEError("ECDH-ES direct agreement carries no encrypted key")
-        cek = concat_kdf(
-            key.exchange(ec.ECDH(), jwk_to_ec_public_key(header.get("epk", {}))),
-            CONTENT_ENCRYPTION.encode("ascii"),
-            b64u_decode(header["apu"]) if "apu" in header else b"",
-            b64u_decode(header["apv"]) if "apv" in header else b"",
-        )
-    else:
-        raise JWEError(f"unsupported JWE algorithm: {algorithm!r}")
+    epk = header.get("epk")
+    if not isinstance(epk, Mapping):
+        raise JWEError("JWE header carries no ephemeral public key")
+    cek = concat_kdf(
+        key.exchange(ec.ECDH(), jwk_to_ec_public_key(epk)),
+        CONTENT_ENCRYPTION.encode("ascii"),
+        _party_info(header, "apu"),
+        _party_info(header, "apv"),
+    )
 
+    # Lengths first: AESGCM would take a 3-byte IV and fail as an auth error,
+    # which reads as "wrong key" when it means "malformed".
+    nonce = _segment(iv, "JWE IV", IV_LENGTH)
+    sealed = _segment(ciphertext, "JWE ciphertext") + _segment(tag, "JWE tag", TAG_LENGTH)
     try:
-        return AESGCM(cek).decrypt(
-            b64u_decode(iv),
-            b64u_decode(ciphertext) + b64u_decode(tag),
-            protected.encode("ascii"),
-        )
+        return AESGCM(cek).decrypt(nonce, sealed, protected.encode("ascii"))
     except InvalidTag as exc:
         raise JWEError("JWE authentication failed") from exc
+
+
+def _party_info(header: Mapping[str, Any], name: str) -> bytes:
+    """`apu`/`apv`: base64url strings if present, and nothing else if not."""
+    value = header.get(name)
+    if value is None:
+        return b""
+    if not isinstance(value, str):
+        raise JWEError(f"JWE {name} is not a string")
+    return _segment(value, f"JWE {name}")
+
+
+def _segment(data: str, what: str, length: int | None = None) -> bytes:
+    try:
+        raw = b64u_decode(data)
+    except ValueError as exc:
+        raise JWEError(f"{what} is not base64url") from exc
+    if length is not None and len(raw) != length:
+        raise JWEError(f"{what} is {len(raw)} bytes, expected {length}")
+    return raw
 
 
 def _seal(header: Mapping[str, Any], cek: bytes, plaintext: bytes) -> str:
@@ -416,3 +486,19 @@ def _b64u_json(value: Mapping[str, Any]) -> str:
 
 def _length_prefixed(data: bytes) -> bytes:
     return struct.pack(">I", len(data)) + data
+
+
+def _bounded(token: str, limit: int, error: type[ValueError], what: str) -> None:
+    if len(token) > limit:
+        raise error(f"{what} is longer than {limit} characters")
+
+
+def _json_object(segment: str, error: type[ValueError], what: str) -> dict[str, Any]:
+    """base64url -> JSON object, with every way that can fail as one error."""
+    try:
+        value = json.loads(b64u_decode(segment))
+    except ValueError as exc:  # UnicodeDecodeError included, it is a ValueError
+        raise error(f"malformed {what}") from exc
+    if not isinstance(value, dict):
+        raise error(f"{what} is not an object")
+    return value

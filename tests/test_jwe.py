@@ -1,4 +1,4 @@
-"""Compact JWE: the `keys_jwe` bundle (ECDH-ES) and the pre-shared-key form."""
+"""Compact JWE: the `keys_jwe` bundle, and every way a hostile one can be malformed."""
 
 import json
 
@@ -182,42 +182,204 @@ def test_rejects_unusable_recipient_keys(jwk, message) -> None:
         jose.encrypt_jwe_ecdh_es(jwk, b"data")
 
 
-def test_dir_round_trips() -> None:
-    cek = bytes(range(32))
-    jwe = jose.encrypt_jwe_dir(cek, b'{"kB":"aaaa"}', kid="recovery-key-id")
-    header = json.loads(jose.b64u_decode(jwe.split(".")[0]))
-    assert header == {"enc": "A256GCM", "alg": "dir", "kid": "recovery-key-id"}
-    assert jose.decrypt_jwe(jwe, cek) == b'{"kB":"aaaa"}'
-
-
-def test_dir_rejects_the_wrong_key_length() -> None:
-    with pytest.raises(jose.JWEError, match="32-byte key"):
-        jose.encrypt_jwe_dir(bytes(16), b"data")
-
-
-def test_decrypt_requires_the_matching_key_kind(recipient) -> None:
-    ecdh = jose.encrypt_jwe_ecdh_es(jose.ec_public_key_to_jwk(recipient.public_key()), b"d")
-    with pytest.raises(jose.JWEError, match="EC private key"):
-        jose.decrypt_jwe(ecdh, bytes(32))
-
-    with pytest.raises(jose.JWEError, match="content encryption key"):
-        jose.decrypt_jwe(jose.encrypt_jwe_dir(bytes(32), b"d"), recipient)
-
-
 @pytest.mark.parametrize(
     "jwe",
     [
+        "",
         "a.b.c.d",
         "a.b.c.d.e.f",
         jose.b64u_encode(b'{"alg":"RSA-OAEP","enc":"A256GCM"}') + "..a.b.c",
-        jose.b64u_encode(b'{"alg":"dir","enc":"A128GCM"}') + "..a.b.c",
-        "not-base64url..a.b.c",
+        jose.b64u_encode(b'{"alg":"dir","enc":"A256GCM"}') + "..a.b.c",
+        jose.b64u_encode(b'{"alg":"ECDH-ES","enc":"A128GCM"}') + "..a.b.c",
+        jose.b64u_encode(b'{"alg":"none","enc":"A256GCM"}') + "..a.b.c",
+        jose.b64u_encode(b"[]") + "..a.b.c",
+        jose.b64u_encode(b"not json") + "..a.b.c",
+        "not+base64url..a.b.c",
     ],
-    ids=["too-few-segments", "too-many-segments", "unsupported-alg", "unsupported-enc", "garbage"],
+    ids=[
+        "empty",
+        "too-few-segments",
+        "too-many-segments",
+        "unsupported-alg",
+        "alg-dir",
+        "unsupported-enc",
+        "alg-none",
+        "header-not-an-object",
+        "header-not-json",
+        "header-not-base64url",
+    ],
 )
-def test_decrypt_rejects_malformed_or_unsupported(jwe) -> None:
+def test_decrypt_rejects_malformed_or_unsupported(jwe, recipient) -> None:
     with pytest.raises(jose.JWEError):
-        jose.decrypt_jwe(jwe, bytes(32))
+        jose.decrypt_jwe(jwe, recipient)
+
+
+# --------------------------------------------------------------------------
+# Hostile input. `decrypt_jwe` is not on the wire — `crypto.js` is, and this
+# is the oracle it is checked against, so it gets the same adversarial pass.
+# --------------------------------------------------------------------------
+
+
+def _rebuilt(jwe: str, recipient=None, **header_changes) -> str:
+    """The same JWE with its protected header edited — i.e. with the AAD broken."""
+    protected, encrypted_key, iv, ciphertext, tag = jwe.split(".")
+    header = json.loads(jose.b64u_decode(protected))
+    for name, value in header_changes.items():
+        if value is _REMOVE:
+            header.pop(name, None)
+        else:
+            header[name] = value
+    edited = jose.b64u_encode(json.dumps(header, separators=(",", ":")).encode())
+    return f"{edited}.{encrypted_key}.{iv}.{ciphertext}.{tag}"
+
+
+_REMOVE = object()
+
+
+@pytest.fixture
+def sealed(recipient) -> str:
+    return jose.encrypt_jwe_ecdh_es(jose.ec_public_key_to_jwk(recipient.public_key()), b"data")
+
+
+def test_rejects_an_ephemeral_key_on_the_wrong_curve(sealed, recipient) -> None:
+    p384 = ec.generate_private_key(ec.SECP384R1()).public_key().public_numbers()
+    size = 48
+    forged = _rebuilt(
+        sealed,
+        epk={
+            "kty": "EC",
+            "crv": "P-384",
+            "x": jose.b64u_encode(p384.x.to_bytes(size, "big")),
+            "y": jose.b64u_encode(p384.y.to_bytes(size, "big")),
+        },
+    )
+    with pytest.raises(jose.JWEError, match="not on curve P-256"):
+        jose.decrypt_jwe(forged, recipient)
+
+
+def test_rejects_an_ephemeral_key_that_is_not_on_the_curve(sealed, recipient) -> None:
+    """The invalid-curve attack.
+
+    A point off P-256 lies on some other curve, often one with small subgroups;
+    an implementation that multiplies its private scalar by it leaks that scalar
+    a few bits at a time. `cryptography` runs the curve equation in
+    `public_key()`, so this dies before any scalar multiplication — assert it,
+    because the whole defence is that one call.
+    """
+    valid = json.loads(jose.b64u_decode(sealed.split(".")[0]))["epk"]
+    y = bytearray(jose.b64u_decode(valid["y"]))
+    y[-1] ^= 0x01
+    forged = _rebuilt(sealed, epk=valid | {"y": jose.b64u_encode(bytes(y))})
+    with pytest.raises(jose.JWEError, match="invalid EC public key"):
+        jose.decrypt_jwe(forged, recipient)
+
+
+def test_rejects_a_missing_ephemeral_key(sealed, recipient) -> None:
+    with pytest.raises(jose.JWEError, match="no ephemeral public key"):
+        jose.decrypt_jwe(_rebuilt(sealed, epk=_REMOVE), recipient)
+
+
+@pytest.mark.parametrize("epk", ["", 42, [], None], ids=["string", "number", "array", "null"])
+def test_rejects_an_ephemeral_key_that_is_not_an_object(sealed, recipient, epk) -> None:
+    with pytest.raises(jose.JWEError, match="no ephemeral public key"):
+        jose.decrypt_jwe(_rebuilt(sealed, epk=epk), recipient)
+
+
+def test_rejects_compression(sealed, recipient) -> None:
+    # We do not inflate anything, and a `zip` we ignore rather than refuse means
+    # handing the caller DEFLATE bytes as if they were the plaintext.
+    with pytest.raises(jose.JWEError, match="compression"):
+        jose.decrypt_jwe(_rebuilt(sealed, zip="DEF"), recipient)
+
+
+def test_rejects_critical_header_parameters(sealed, recipient) -> None:
+    # RFC 7516 §4.1.13: `crit` means "reject this unless you implement it".
+    with pytest.raises(jose.JWEError, match="critical header"):
+        jose.decrypt_jwe(_rebuilt(sealed, crit=["exp"], exp=1), recipient)
+
+
+def test_rejects_an_encrypted_key_segment(sealed, recipient) -> None:
+    protected, _, iv, ciphertext, tag = sealed.split(".")
+    with pytest.raises(jose.JWEError, match="no encrypted key"):
+        jose.decrypt_jwe(f"{protected}.{jose.b64u_encode(b'x' * 32)}.{iv}.{ciphertext}.{tag}",
+                         recipient)
+
+
+@pytest.mark.parametrize("name", ["apu", "apv"])
+def test_rejects_party_info_that_is_not_a_string(sealed, recipient, name) -> None:
+    with pytest.raises(jose.JWEError, match=f"{name} is not a string"):
+        jose.decrypt_jwe(_rebuilt(sealed, **{name: 42}), recipient)
+
+
+def test_rejects_a_tampered_tag(sealed, recipient) -> None:
+    protected, _, iv, ciphertext, tag = sealed.split(".")
+    flipped = bytearray(jose.b64u_decode(tag))
+    flipped[0] ^= 0xFF
+    with pytest.raises(jose.JWEError, match="authentication failed"):
+        jose.decrypt_jwe(
+            f"{protected}..{iv}.{ciphertext}.{jose.b64u_encode(bytes(flipped))}", recipient
+        )
+
+
+@pytest.mark.parametrize(
+    ("segment", "raw", "message"),
+    [
+        (2, bytes(11), "IV is 11 bytes"),
+        (2, bytes(13), "IV is 13 bytes"),
+        (4, bytes(15), "tag is 15 bytes"),
+        (4, bytes(17), "tag is 17 bytes"),
+    ],
+    ids=["short-iv", "long-iv", "short-tag", "long-tag"],
+)
+def test_rejects_a_wrongly_sized_iv_or_tag(sealed, recipient, segment, raw, message) -> None:
+    # AESGCM would take a 13-byte nonce and fail as an authentication error,
+    # which reads as "wrong key" when what happened is "malformed".
+    parts = sealed.split(".")
+    parts[segment] = jose.b64u_encode(raw)
+    with pytest.raises(jose.JWEError, match=message):
+        jose.decrypt_jwe(".".join(parts), recipient)
+
+
+@pytest.mark.parametrize("segment", [2, 3, 4], ids=["iv", "ciphertext", "tag"])
+def test_rejects_a_segment_that_is_not_base64url(sealed, recipient, segment) -> None:
+    parts = sealed.split(".")
+    parts[segment] = "not+base64url"
+    with pytest.raises(jose.JWEError, match="not base64url"):
+        jose.decrypt_jwe(".".join(parts), recipient)
+
+
+def test_rejects_an_oversized_body(recipient) -> None:
+    body = jose.encrypt_jwe_ecdh_es(
+        jose.ec_public_key_to_jwk(recipient.public_key()), b"x" * jose.MAX_JWE_LENGTH
+    )
+    assert len(body) > jose.MAX_JWE_LENGTH
+    with pytest.raises(jose.JWEError, match="longer than"):
+        jose.decrypt_jwe(body, recipient)
+
+
+def test_rejects_an_oversized_protected_header(sealed, recipient) -> None:
+    forged = _rebuilt(sealed, pad="A" * jose.MAX_JWE_HEADER_LENGTH)
+    with pytest.raises(jose.JWEError, match="header is longer than"):
+        jose.decrypt_jwe(forged, recipient)
+
+
+def test_a_real_keys_jwe_fits_well_inside_both_caps(recipient) -> None:
+    # The caps have to sit above what the browser actually sends, or they are an
+    # outage rather than a bound. `oauth/models.py` caps `keys_jwe` at 8 KiB too.
+    kb = bytes(range(32))
+    keys = {
+        scoped_keys.OLDSYNC_SCOPE: scoped_keys.derive_scoped_key(
+            scope=scoped_keys.OLDSYNC_SCOPE,
+            kb=kb,
+            uid="a" * 32,
+            key_rotation_timestamp=1510726317123,
+        )
+    }
+    blob = jose.encrypt_jwe_ecdh_es(
+        jose.ec_public_key_to_jwk(recipient.public_key()), json.dumps(keys).encode()
+    )
+    assert len(blob) < 1024
+    assert len(blob.split(".")[0]) < jose.MAX_JWE_HEADER_LENGTH
 
 
 def test_a_scoped_key_bundle_survives_the_round_trip(recipient) -> None:

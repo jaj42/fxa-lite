@@ -609,7 +609,8 @@ blocks phase 12, so it goes first.
 
 As built:
 
-- `UPSTREAM.toml` — five `[[repo]]` entries, fifty paths. Each entry is `dir` (the directory
+- `UPSTREAM.toml` — five `[[repo]]` entries, fifty paths (phase 9 added two more, for the
+  libraries it evaluated). Each entry is `dir` (the directory
   under `resources/`), `url`, `branch`, the full 40-character `commit`, `date`, one line of
   `took`, and `paths`. Branch is per repo and not an afterthought: only `mozilla/fxa` is on
   `main`, the other four are still on `master`, so the `origin/main` in the sketch above would
@@ -692,7 +693,7 @@ source and each one is a sentence in phase 12:
   at a custom server at all is unknown. Establish it or record that it cannot, rather than leaving
   the README silent on a client the code claims to support.
 
-### Phase 9 — harden `crypto/jose.py`
+### Phase 9 — harden `crypto/jose.py` ✅ done
 
 The "don't roll your own crypto" instinct is right, and its target is smaller than it looks.
 `crypto/hkdf.py`, `onepw.py`, `tokens.py` and `scoped_keys.py` are FxA protocol derivations — no
@@ -735,6 +736,67 @@ nothing on the wire. If a library *is* adopted after all, the **Dependencies** s
 being true and needs saying so.
 
 This is the audit's largest single input, which is why it lands before phase 10 rather than after.
+
+As built:
+
+- **The library question came back "yes" to both, which is not what this plan expected.**
+  `joserfc` 1.7.4 and `jwcrypto` 1.5.8, evaluated from PyPI and pinned in `UPSTREAM.toml` at the
+  releases that were read. Both sign and verify RS256 that `jose.py` accepts and vice versa; both
+  do compact `ECDH-ES`+`A256GCM` that `decrypt_jwe` opens, and both open ours — cross-decrypted
+  in each direction, against `tests/vectors/jose.json` unchanged. Both take `algorithms=` /
+  `algs=` per call and enforce it. Both refuse `alg: none` and the HS256-with-the-public-key
+  confusion *with the argument omitted*, which is the failure mode the question was really
+  about. `joserfc` costs exactly one dependency and it is `cryptography`; `jwcrypto` adds
+  `typing_extensions` as well. So the objection that answered `python-jose` does not transfer,
+  and neither does its conclusion.
+- **Not adopted anyway, and the reason is smaller than "timing".** Counting what is actually
+  exposed: nothing in `src/` decrypts a JWE. The browser seals the `keys_jwe` in
+  `content/assets/crypto.js`, the relier opens it, and the auth server stores the blob and echoes
+  it back — `encrypt_jwe_ecdh_es` and `decrypt_jwe` have no caller outside `tests/`. The whole
+  hostile-input surface a library would take over is `verify_jwt` plus `decode_jwt_header`, about
+  90 lines, reached from three `Authorization:` headers. A library would not have removed the JWE
+  code, because that code's job is to be the oracle `crypto.js` is checked against, and no Python
+  library can be the oracle for the JS that ships to the browser. "A library gets patched when a
+  parsing CVE lands" is the argument that survives, and it is worth less against 90 lines that
+  accept one algorithm than it looked worth against 418. Revisit if `jose.py` ever grows a second
+  algorithm — that is the change that flips this.
+- The **Dependencies** section stands: `fastapi`, `uvicorn[standard]`, `cryptography`.
+  `hypothesis` is new in the dev group.
+- `jose.py` hardened where the audit will look. Length caps first, because they bound how much
+  unauthenticated work a request can ask for before anything is verified: `MAX_JWT_LENGTH` 8 KiB
+  (a real access token with ten scopes is under 2 KiB — there is a test asserting the cap has
+  room), `MAX_JWE_LENGTH` 250 KiB after python-jose's precedent, `MAX_JWE_HEADER_LENGTH` 8 KiB.
+  Then: `exp`/`iat` must be NumericDates, and `bool` is excluded by hand because `exp: true` is
+  an `int` in Python; the payload is parsed only *after* the signature verifies; `zip` and `crit`
+  are refused rather than ignored, since a `zip` we skip past means handing the caller DEFLATE
+  bytes as if they were plaintext; `apu`/`apv` must be strings; the IV and tag are length-checked
+  before AESGCM sees them, so "malformed" stops reporting itself as "authentication failed".
+- `b64u_decode` now rejects anything outside the base64url alphabet instead of silently
+  discarding it. `base64.urlsafe_b64decode` drops stray characters, so a client that reached for
+  standard base64 got `+` and `/` decoded as *something* — a plausible-looking key nobody can
+  encrypt to. The tokenserver already matched base64url by hand for this reason.
+- `alg=dir` is gone in both directions, not just `encrypt_jwe_dir` as planned. The plan's argument
+  for deleting the encrypting half — referenced only by `tests/test_jwe.py`, nothing on the wire —
+  is exactly as true of the decrypting half once no producer remains, and it left `decrypt_jwe`
+  taking `bytes | EllipticCurvePrivateKey` for no caller. `decrypt_jwe` now takes a P-256 private
+  key, and the union checks it needed went with it.
+- The RS256 known-answer test the file lacked: RFC 7515 App. A.2, extracted from the RFC text
+  rather than typed in. Both directions — `verify_jwt` accepts the RFC's token under the RFC's
+  key, and `jwk_to_private_key` + PKCS#1 v1.5 reproduces the RFC's signature byte for byte, which
+  is only possible because v1.5 is deterministic where PSS would leave verification as the only
+  pinnable half. It also fails closed on `exp` without a `now`, since the vector expired in 2011.
+- Negative tests: the full list above, plus a payload that is not an object, a header that is not
+  an object, a signature that is not base64url, an `epk` that is missing or not an object, a
+  non-empty encrypted-key segment, and IVs and tags of the wrong length.
+- `tests/test_jose_properties.py` — hypothesis over the parsers. The named tests are a list of
+  known failures; the property is the invariant behind the list, which a list cannot cover:
+  whatever arrives at `verify_jwt` or `decrypt_jwe`, what comes back out is the claims, the
+  plaintext, or `JWTError`/`JWEError` — never a `binascii.Error` or a `TypeError`, because the
+  three callers turn those two into a 401 and anything else into a 500 with a traceback on an
+  unauthenticated route. Plus round trips, the expiry boundary, and single-*byte* mutation of
+  every segment (bytes, not characters: the trailing base64url character carries unused bits, so
+  two spellings can decode to the same bytes and a character-level flip is allowed to be a no-op).
+- Verified: 703 tests, `ruff check` and `ty check` clean.
 
 ### Phase 10 — security audit
 

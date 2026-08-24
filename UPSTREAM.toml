@@ -144,3 +144,43 @@ paths = [
   # 3.4.0 fixed CVE-2024-33663/33664; 3.5.0 is the last release.
   "CHANGELOG.md",
 ]
+
+[[repo]]
+dir = "joserfc"
+url = "https://github.com/authlib/joserfc"
+branch = "main"
+commit = "7facdee77fc8735ad88e586b31c5b0c940ee0a78"
+date = "2026-07-13"
+took = "nothing — evaluated at 1.7.4 in phase 9: it answers both questions yes and was still not adopted, see plan.md. Pinned at the release that was evaluated, not at head; a newer commit here answers no question fxa-lite is asking, so this entry's log is informational until somebody re-opens the question"
+paths = [
+  # RS256 and compact ECDH-ES+A256GCM both work against tests/vectors/jose.json
+  # unchanged, and `algorithms=` is a per-call argument on both.
+  "src/joserfc/jws.py",
+  "src/joserfc/jwe.py",
+  "src/joserfc/jwt.py",
+  # The concat KDF and the ECDH-ES agreement, which is the half python-jose could not do.
+  "src/joserfc/_rfc7518/derive_key.py",
+  "src/joserfc/_rfc7518/jwe_algs.py",
+  # Header validation: where the 1 KiB header cap and the `crit` handling live.
+  "src/joserfc/registry.py",
+  "src/joserfc/errors.py",
+  # One dependency, and it is `cryptography` — the python-jose objection does not apply.
+  "pyproject.toml",
+]
+
+[[repo]]
+dir = "jwcrypto"
+url = "https://github.com/latchset/jwcrypto"
+branch = "main"
+commit = "eb7c266d18d1a45abce420492d48a3d01d281916"
+date = "2026-06-24"
+took = "nothing — evaluated at 1.5.8 in phase 9 alongside joserfc, same outcome, and pinned at the evaluated release for the same reason"
+paths = [
+  "jwcrypto/jws.py",
+  "jwcrypto/jwe.py",
+  "jwcrypto/jwt.py",
+  # The registry of algorithms a token is allowed to name, and the default allow-list —
+  # the thing an `algorithms=` argument is compared against.
+  "jwcrypto/jwa.py",
+  "pyproject.toml",
+]
