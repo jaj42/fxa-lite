@@ -2,8 +2,9 @@
 
 One app, one origin.  The accounts and OAuth APIs mount at `/v1` — the prefix
 the reference auth server uses, and the one it serves OAuth from too — the
-profile server at `/profile/v1`, the Sync tokenserver at `/token`, and the
-sign-in page, its assets and the discovery documents at the root.
+profile server at `/profile/v1`, the Sync tokenserver at `/token`, Sync
+storage at `/storage`, and the sign-in page, its assets and the discovery
+documents at the root.
 `/.well-known/fxa-client-configuration` tells Firefox where each of those is,
 so the layout is ours to choose; see `wellknown.py`.
 
@@ -14,8 +15,8 @@ The error handlers matter as much as the routes.  A client reads `errno`, not
 the HTTP status, so an unhandled exception that escapes as FastAPI's default
 `{"detail": ...}` is not "a 500 with a different body" — it is a response the
 client cannot interpret at all.  Everything is funnelled through
-`errors.FxaError` — except the tokenserver, which has always spoken a different
-envelope and gets its own handler.
+`errors.FxaError` — except the tokenserver and Sync storage, each of which
+has always spoken a different envelope and gets its own handler.
 """
 
 from __future__ import annotations
@@ -26,10 +27,10 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from starlette.exceptions import HTTPException
 
-from . import __version__, auth, content, errors, profile, tokenserver, wellknown
+from . import __version__, auth, content, errors, profile, syncstorage, tokenserver, wellknown
 from .config import Config
 from .db import Database, open_database
 from .oauth import routes as oauth_routes
@@ -46,6 +47,9 @@ API_PREFIX = "/v1"
 PROFILE_PREFIX = "/profile/v1"
 #: What `sync_tokenserver_base_url` points at; Firefox appends `/1.0/sync/1.5`.
 TOKENSERVER_PREFIX = "/token"
+#: The tokenserver's `node`, and therefore the prefix of every `api_endpoint`
+#: it hands out: Firefox appends `/1.5/<uid>` and then the storage path.
+STORAGE_PREFIX = "/storage"
 
 
 def create_app(
@@ -95,6 +99,7 @@ def create_app(
     app.include_router(oauth_routes.router, prefix=API_PREFIX)
     app.include_router(profile.router, prefix=PROFILE_PREFIX)
     app.include_router(tokenserver.router, prefix=TOKENSERVER_PREFIX)
+    app.include_router(syncstorage.router, prefix=STORAGE_PREFIX)
     app.include_router(wellknown.router)
     app.include_router(content.router)
     _add_defaults(app, config)
@@ -144,6 +149,28 @@ def _add_error_handlers(app: FastAPI) -> None:
         """The tokenserver's envelope is not the accounts API's — see its `errors`."""
         return JSONResponse(exc.payload, status_code=exc.http_status)
 
+    @app.exception_handler(syncstorage.errors.SyncStorageError)
+    async def sync_storage_error_handler(
+        request: Request, exc: syncstorage.errors.SyncStorageError
+    ) -> Response:
+        """Sync 1.5 answers with a bare integer, or with nothing at all.
+
+        304 and 412 are answers, not failures: they carry `X-Last-Modified` and
+        no body, because a body on a 304 is a protocol violation and a client
+        that reads one gets a record it did not ask for.
+        """
+        if exc.status_code in (304, 412):
+            response: Response = Response(status_code=exc.status_code, headers=exc.headers)
+        else:
+            response = JSONResponse(
+                exc.payload, status_code=exc.status_code, headers=exc.headers
+            )
+        # Upstream stamps this on every response including errors, and a client
+        # whose credential was just refused over clock skew learns the server's
+        # time from the refusal itself.
+        syncstorage.weave_timestamp(response)
+        return response
+
     @app.exception_handler(errors.FxaError)
     async def fxa_error_handler(request: Request, exc: errors.FxaError) -> JSONResponse:
         return JSONResponse(exc.payload, status_code=exc.code, headers=exc.headers)
@@ -155,7 +182,15 @@ def _add_error_handlers(app: FastAPI) -> None:
         return await fxa_error_handler(request, _from_validation_error(request, exc))
 
     @app.exception_handler(HTTPException)
-    async def http_error_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    async def http_error_handler(request: Request, exc: HTTPException) -> Response:
+        if request.url.path.startswith(f"{STORAGE_PREFIX}/"):
+            # `render_404` upstream: a 404 below the storage prefix is still a
+            # Sync response, and Sync's whole error vocabulary is one integer.
+            # Handing it the accounts envelope would read as a JSON object
+            # where the client expects a number.
+            return await sync_storage_error_handler(
+                request, syncstorage.errors.SyncStorageError(exc.status_code)
+            )
         if request.url.path.startswith(f"{TOKENSERVER_PREFIX}/"):
             # A 404 below `/token` is still a tokenserver response. Firefox has
             # a separate parser for each shape and reads `status` out of this

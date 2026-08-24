@@ -1,0 +1,51 @@
+{
+  "source": "syncstorage-rs/syncserver/src/web/auth.rs, mod tests: TestFixture::new() and valid_header_with_querystring. The token id, MAC, nonce and ts are the fixture's own values; the master secret is its Secrets::new(\"Ted Koppel is a robot\").",
+  "master_secret": "Ted Koppel is a robot",
+  "token_id": "eyJ1aWQiOiAxLCAibm9kZSI6ICJodHRwOi8vbG9jYWxob3N0OjUwMDAiLCAiZXhwaXJlcyI6IDE4ODQ5Njg0MzkuMCwgImZ4YV91aWQiOiAiMzE5Yjk4Zjk5NjFmZjFkYmRkMDczMTNjZDZiYTkyNWEiLCAiZnhhX2tpZCI6ICJkZTY5N2FkNjZkODQ1YjI4NzNjOWQ3ZTEzYjg5NzFhZiIsICJoYXNoZWRfZnhhX3VpZCI6ICIwZThkZjVkNDEzOThhMzg5OTEzYmQ4NDAyNDM1NjQ5NTE4YWY0NjQ5M2RhMWQ0YTQzN2E0NmRjMTc4NGM1MDFhIiwgImhhc2hlZF9kZXZpY2VfaWQiOiAiMmJjYjkyZjRkNDY5OGMzZDdiMDgzYTNjNjk4YTE2Y2NkNzhiYzJhOGQyMGE5NmU0YmIxMjhkZGNlYWY0ZTBiNiIsICJzYWx0IjogIjJiMzA3YiJ9lXaC5pIOenf7qL1AWlgKFvYH63nakyniTXP-7acS5cw=",
+  "claims": {
+    "uid": 1,
+    "node": "http://localhost:5000",
+    "expires": 1884968439.0,
+    "fxa_uid": "319b98f9961ff1dbdd07313cd6ba925a",
+    "fxa_kid": "de697ad66d845b2873c9d7e13b8971af",
+    "hashed_fxa_uid": "0e8df5d41398a389913bd8402435649518af46493da1d4a437a46dc1784c501a",
+    "hashed_device_id": "2bcb92f4d4698c3d7b083a3c698a16ccd78bc2a8d20a96e4bb128ddceaf4e0b6",
+    "salt": "2b307b"
+  },
+  "derived_key": "dSi3EoZyHwgDp-O9OG1jRHtmbGl2M1bwcWsi04C4F58=",
+  "requests": [
+    {
+      "name": "valid_header",
+      "method": "GET",
+      "resource": "/storage/1.5/1/storage/col2",
+      "host": "localhost",
+      "port": 5000,
+      "ts": 1569608439,
+      "nonce": "h1Ch4vo=",
+      "mac": "UwDpC+DSrHCSTQSfMOWlueB6kM6gHb0Hsv8eU9ZcTVs="
+    },
+    {
+      "name": "valid_header_with_querystring",
+      "method": "POST",
+      "resource": "/storage/1.5/1/storage/col2?batch=MTUzNjE5ODk3NjkyMQ==&commit=true",
+      "host": "localhost",
+      "port": 5000,
+      "ts": 1569608439,
+      "nonce": "4Rj7c+0=",
+      "mac": "E7j1UjN7//mh7pYXsgGi3n0KGR+sUPpuyogDVzJWaHg="
+    }
+  ],
+  "offsets": {
+    "source": "syncstorage-db-common/src/util.rs, mod encode_next_offset_tests",
+    "cases": [
+      {"name": "index_sort_returns_numeric_offset", "sort": "index", "prev_offset": 50, "prev_timestamp": null, "modified": [19, 83, 747], "expected": "53"},
+      {"name": "empty_modified_timestamps_returns_prev_offset", "sort": "newest", "prev_offset": 42, "prev_timestamp": null, "modified": [], "expected": "42"},
+      {"name": "unique_last_timestamp_skip_is_one", "sort": "newest", "prev_offset": 0, "prev_timestamp": null, "modified": [5500, 4200, 3800], "expected": "3800:1"},
+      {"name": "skip_counts_identical_tail_timestamps", "sort": "newest", "prev_offset": 0, "prev_timestamp": null, "modified": [5000, 3800, 3800], "expected": "3800:2"},
+      {"name": "identical_timestamps_no_prev_bound_match", "sort": "newest", "prev_offset": 0, "prev_timestamp": 2048, "modified": [3800, 3800, 3800], "expected": "3800:3"},
+      {"name": "identical_timestamps_with_matching_prev_bound_sums", "sort": "newest", "prev_offset": 2, "prev_timestamp": 9000, "modified": [9000, 9000, 9000], "expected": "9000:5"},
+      {"name": "oldest_sort_works", "sort": "oldest", "prev_offset": 0, "prev_timestamp": null, "modified": [8900, 9000, 9100], "expected": "9100:1"},
+      {"name": "none_sort_produces_timestamp_token", "sort": null, "prev_offset": 0, "prev_timestamp": null, "modified": [5500, 4200, 3800], "expected": "3800:1"}
+    ]
+  }
+}

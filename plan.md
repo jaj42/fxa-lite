@@ -483,7 +483,7 @@ As built:
   a specification to match. Each consistency rule has its own test with the credential hand-built,
   since a real client cannot produce most of those situations. `ruff check` and `ty check` clean.
 
-### Phase 6 — Sync 1.5 storage
+### Phase 6 — Sync 1.5 storage ✅ done
 Real HAWK verification this time (id = tokenlib token, key = derived secret, algorithm sha256,
 payload hash checked). Endpoints: `GET /info/{collections,collection_counts,collection_usage,
 configuration,quota}`, `GET|POST|DELETE /storage/{collection}`, `GET|PUT|DELETE
@@ -491,6 +491,64 @@ configuration,quota}`, `GET|POST|DELETE /storage/{collection}`, `GET|PUT|DELETE
 `X-Weave-Timestamp`, `X-Weave-Records`, `X-Weave-Next-Offset`, `X-If-Unmodified-Since`,
 `X-If-Modified-Since`. Batch upload (`?batch=true` / `commit=true`). Two-decimal-second
 timestamps stored as integer milliseconds.
+
+As built:
+
+- `syncstorage/hawk.py` — the MAC is verified, and this is the first place in the codebase where
+  that sentence is true. Pinned against the complete worked example in `web/auth.rs`'s own tests:
+  a master secret, a tokenlib id minted from it and two signed requests with their MACs, run end
+  to end through signing key → token signature → derived HAWK key → MAC. Host and port come from
+  `public_url` rather than the `Host` header, because the client signed the URL the tokenserver
+  handed it and that URL is built from `public_url` — reading the request instead would mean any
+  proxy rewriting `Host` silently breaks every signature. Upstream reads actix's `ConnectionInfo`
+  because it has no `public_url` to consult.
+- **The payload hash is checked when the client sends one, which upstream does not do** — neither
+  syncstorage-rs nor the Python server before it. The MAC covers whatever `hash` the client
+  claimed, not the body that arrived, so without this the body is unauthenticated. A correct HAWK
+  client computes it correctly by definition; one that omits it is still served, with its body
+  uncovered, which is what the specification says and what every client relies on.
+- `syncstorage/errors.py` — the *third* error envelope: a bare JSON integer, the Weave code, as
+  the whole body. `ResponseError::error_response` keeps the descriptive form commented out for
+  Sync 1.1 compatibility, so this is not an oversight to tidy up. `app.py` gained a handler, and
+  routes a 404 below `/storage` there too, the way `render_404` does.
+- `syncstorage/store.py` — schema v3 (`sync_collections`, `sync_user_collections`, `sync_bso`,
+  `sync_batches`, `sync_batch_items`), all hanging off `sync_users.uid`, so a key rotation's new
+  uid gets an empty directory and the old records stay where nothing will try the new key on them.
+  Collection id 0 is the tombstone, seeded by the migration, which is how deleting a collection
+  moves the *storage* timestamp with nothing left to carry one.
+- One request is one transaction, one timestamp, quantized to a hundredth of a second before
+  anything is written. **A write that cannot move its collection's timestamp forward is refused**
+  (503 + `Retry-After: 10`), which is upstream's `lock_for_write`. It fires far more often here
+  than upstream — an in-process SQLite write takes microseconds where a MySQL round trip takes
+  milliseconds — but the invariant it protects is the one `?newer=` polling rests on, and
+  inventing a different answer would mean a behaviour no client has been tested against. The
+  conformance client waits out the tick and retries, as a real client does.
+- Two upstream behaviours deliberately *not* reproduced, each noted at its method: `do_append`
+  forgets to filter on the BSO id, so re-sending one record in a batch rewrites every record
+  already staged in it; and a storage wipe leaves open batches behind, so committing an id opened
+  beforehand resurrects what the wipe removed. Both are bugs rather than protocol.
+- Reproduced *because* they are protocol, however odd: a `put` carrying neither payload nor
+  sortindex does not move `modified`; a batch item with no ttl commits with `MAX_TTL` as an
+  absolute instant rather than as a duration, a different "forever" from the un-batched path's;
+  `get_bso_ids` pages with a bare row count where `get_bsos` pages with a timestamp token; and
+  `/info/collections` is served on an expired credential, matched on all five path segments so
+  that the BSO `collections` in collection `info` is not.
+- `/info/configuration` takes no credential — upstream's handler takes neither a token nor a
+  database connection. The limits are constants a client needs before it can decide how to split
+  an upload, and requiring a token to read a published constant only produces clients that cannot
+  ask. Limits are fixed rather than configurable: they are what every Firefox has been written
+  against, and a household server has no business being the one place in the ecosystem where a
+  client meets a limit it has never seen. `/info/quota` reports a null limit for the same reason —
+  a number would be a promise the filesystem, not this server, decides whether to keep.
+- Timestamps go out as JSON floats rather than upstream's arbitrary-precision numbers, so `0.00`
+  reads as `0`. The value is identical and clients compare timestamps, not their spelling;
+  `X-Last-Modified`, which is a string, always carries both decimals.
+- Verified: 604 tests. `tests/conformance/client.py` grew a storage client that builds the
+  normalized HAWK string itself, from the specification rather than from `fxa_lite.syncstorage` —
+  so every signature in the HTTP tests is checked by an independent implementation.
+  `test_the_whole_stack_composes` runs password → `kB` → oldsync key → access token →
+  tokenserver → HAWK-signed PUT → read back, which is the test that fails if any two tiers
+  disagree about what they hand each other. `ruff check` and `ty check` clean.
 
 ### Phase 7 — real Firefox
 Fresh profile, `about:config`:

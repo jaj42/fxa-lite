@@ -160,9 +160,85 @@ CREATE TABLE sync_users (
 CREATE INDEX sync_users_fxa_uid ON sync_users(fxa_uid);
 """
 
+SCHEMA_V3 = """
+-- Phase 6: Sync 1.5 storage.
+--
+-- Everything here hangs off `sync_users.uid`, the small integer the tokenserver
+-- allocates -- not the FxA uid.  That is deliberate and it is the whole point
+-- of the split: rotating the Sync key mints a new `sync_users` row, and the
+-- records written under the old key stay attached to the old uid where nothing
+-- will try to decrypt them with the new one.
+--
+-- Upstream (`syncstorage-mysql/src/db/schema.rs`) is four tables with the same
+-- shape; the column names differ because theirs still carry Sync 1.1's
+-- spelling (`userid`, `collection`, `ttl`).  What is reproduced exactly is the
+-- semantics: a per-collection last-modified that a write must move forward,
+-- and an expiry stored as an absolute instant rather than a duration.
+CREATE TABLE sync_collections (
+    id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT    NOT NULL UNIQUE
+) STRICT;
+
+-- Collection id 0 is the tombstone, and belongs to no collection.  Deleting a
+-- collection has to move the *storage* timestamp even though it leaves no
+-- collection behind to carry one; upstream records that by writing a
+-- `user_collections` row under this reserved id, which then falls out of the
+-- MAX() that defines the storage timestamp.  Seeded with the empty name so the
+-- foreign key below is real and so no collection can ever claim the id.
+INSERT INTO sync_collections (id, name) VALUES (0, '');
+
+CREATE TABLE sync_user_collections (
+    uid           INTEGER NOT NULL REFERENCES sync_users(uid) ON DELETE CASCADE,
+    collection_id INTEGER NOT NULL REFERENCES sync_collections(id),
+    modified      INTEGER NOT NULL,
+    PRIMARY KEY (uid, collection_id)
+) STRICT;
+
+CREATE TABLE sync_bso (
+    uid           INTEGER NOT NULL REFERENCES sync_users(uid) ON DELETE CASCADE,
+    collection_id INTEGER NOT NULL REFERENCES sync_collections(id),
+    id            TEXT    NOT NULL,
+    sortindex     INTEGER,
+    payload       TEXT    NOT NULL,
+    modified      INTEGER NOT NULL,
+    -- Absolute expiry in milliseconds, not a TTL: a row is invisible once it
+    -- passes, and is only actually deleted when something happens to touch it.
+    expiry        INTEGER NOT NULL,
+    PRIMARY KEY (uid, collection_id, id)
+) STRICT;
+
+-- The shape of every read: one collection of one user, ordered by modified and
+-- filtered on expiry.
+CREATE INDEX sync_bso_modified ON sync_bso(uid, collection_id, modified);
+
+-- A batch is an upload in progress: rows accumulate here across several POSTs
+-- and land in `sync_bso` all at once, sharing a single timestamp, when the
+-- client commits.  The id is a millisecond timestamp, which is also how its
+-- lifetime is checked -- see `BATCH_LIFETIME`.
+CREATE TABLE sync_batches (
+    uid           INTEGER NOT NULL REFERENCES sync_users(uid) ON DELETE CASCADE,
+    batch_id      INTEGER NOT NULL,
+    collection_id INTEGER NOT NULL REFERENCES sync_collections(id),
+    PRIMARY KEY (uid, batch_id)
+) STRICT;
+
+CREATE TABLE sync_batch_items (
+    uid        INTEGER NOT NULL,
+    batch_id   INTEGER NOT NULL,
+    id         TEXT    NOT NULL,
+    sortindex  INTEGER,
+    payload    TEXT,
+    -- Kept as the client sent it, in seconds, because the instant it becomes
+    -- an expiry is the commit's timestamp and not this row's.
+    ttl_offset INTEGER,
+    PRIMARY KEY (uid, batch_id, id),
+    FOREIGN KEY (uid, batch_id) REFERENCES sync_batches(uid, batch_id) ON DELETE CASCADE
+) STRICT;
+"""
+
 #: Ordered DDL steps. A database stamped `user_version = N` has had the first
 #: `N` applied, so an existing file is upgraded by running the rest.
-MIGRATIONS = (SCHEMA_V1, SCHEMA_V2)
+MIGRATIONS = (SCHEMA_V1, SCHEMA_V2, SCHEMA_V3)
 
 #: Stored in SQLite's `user_version`.
 SCHEMA_VERSION = len(MIGRATIONS)
@@ -599,6 +675,18 @@ class Database:
             (fxa_uid,),
         )
         return [SyncUser(**dict(row)) for row in rows]
+
+    def sync_user(self, uid: int) -> SyncUser | None:
+        """One Sync uid, live or retired.
+
+        The storage tier looks a user up by this number and nothing else: a
+        token names it, and the row's continued existence is the only thing
+        standing between an access token that outlived its account and a
+        directory of records belonging to whoever gets that uid next.
+        """
+        return _one(
+            SyncUser, self.connection.execute("SELECT * FROM sync_users WHERE uid = ?", (uid,))
+        )
 
     def create_sync_user(
         self,

@@ -43,6 +43,30 @@ def test_an_older_database_is_migrated_in_place(tmp_path) -> None:
         database.close()
 
 
+def test_a_phase_5_database_gains_the_storage_tables(tmp_path) -> None:
+    """The upgrade an installation running the tokenserver but not storage sees."""
+    path = tmp_path / "fxa.sqlite"
+    connection = sqlite3.connect(path)
+    connection.executescript(MIGRATIONS[0])
+    connection.executescript(MIGRATIONS[1])
+    connection.execute("PRAGMA user_version = 2")
+    connection.commit()
+    connection.close()
+
+    database = open_database(path)
+    try:
+        assert database.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert database.connection.execute("SELECT COUNT(*) FROM sync_bso").fetchone()[0] == 0
+        # Collection id 0 is reserved for the tombstone and seeded by the
+        # migration; without it, deleting a collection has nothing to record
+        # the storage timestamp against.
+        assert database.connection.execute(
+            "SELECT name FROM sync_collections WHERE id = 0"
+        ).fetchone()[0] == ""
+    finally:
+        database.close()
+
+
 def test_a_newer_schema_is_refused(tmp_path) -> None:
     """Better to stop than to run half-understood queries against someone's keys."""
     path = tmp_path / "fxa.sqlite"

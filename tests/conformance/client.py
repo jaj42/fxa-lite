@@ -23,6 +23,7 @@ only where the stdlib has no equivalent.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -33,6 +34,7 @@ import struct
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from cryptography.exceptions import InvalidSignature
@@ -721,3 +723,197 @@ def sync_key_id(scoped_key: dict[str, Any]) -> str:
     """
     return str(scoped_key["kid"])
 
+
+
+# --------------------------------------------------------------------------
+# Sync 1.5 storage, from the client's side.
+# --------------------------------------------------------------------------
+#
+# Phase 6's independent implementation.  Unlike the accounts API's HAWK — which
+# neither fxa-lite nor Mozilla verifies — this one is checked byte for byte, so
+# the client below has to build the normalized string correctly or nothing
+# passes.  It is written out from the HAWK specification and
+# `syncserver/src/web/auth.rs` rather than shared with `fxa_lite.syncstorage`.
+
+#: The normalized string HAWK takes its MAC over. Every field is significant;
+#: the trailing newline is too.
+HAWK_HEADER_PREFIX = "hawk.1.header"
+HAWK_PAYLOAD_PREFIX = "hawk.1.payload"
+
+
+def hawk_payload_hash(body: bytes, content_type: str) -> str:
+    """`base64(sha256("hawk.1.payload\\n<type>\\n<body>\\n"))`, media type only."""
+    media = content_type.partition(";")[0].strip().lower()
+    prefix = f"{HAWK_PAYLOAD_PREFIX}\n{media}\n".encode()
+    return base64.b64encode(hashlib.sha256(prefix + body + b"\n").digest()).decode()
+
+
+def hawk_storage_header(
+    *,
+    token_id: str,
+    key: str,
+    method: str,
+    resource: str,
+    host: str,
+    port: int,
+    body: bytes | None = None,
+    content_type: str = "",
+    ts: int | None = None,
+    nonce: str | None = None,
+) -> str:
+    """Sign one storage request. `resource` is the path *with* its query string."""
+    ts = int(time.time()) if ts is None else ts
+    nonce = secrets.token_urlsafe(6) if nonce is None else nonce
+    payload_hash = hawk_payload_hash(body, content_type) if body is not None else ""
+    normalized = (
+        "\n".join(
+            [
+                HAWK_HEADER_PREFIX,
+                str(ts),
+                nonce,
+                method.upper(),
+                resource,
+                host.lower(),
+                str(port),
+                payload_hash,
+                "",
+            ]
+        )
+        + "\n"
+    )
+    mac = base64.b64encode(
+        hmac.new(key.encode(), normalized.encode(), hashlib.sha256).digest()
+    ).decode()
+    header = f'Hawk id="{token_id}", ts="{ts}", nonce="{nonce}", mac="{mac}"'
+    if payload_hash:
+        header += f', hash="{payload_hash}"'
+    return header
+
+
+class SyncStorageClient:
+    """The storage half of a Sync client, signing every request itself.
+
+    Built from a tokenserver response, exactly as Firefox builds it: the `id`
+    and `key` are what the tokenserver handed over, and `api_endpoint` is the
+    URL every path here hangs off.
+    """
+
+    def __init__(self, http: httpx.AsyncClient, token: dict[str, Any], *, secret: str) -> None:
+        self.http = http
+        self.token_id = str(token["id"])
+        self.key = str(token["key"])
+        self.uid = int(token["uid"])
+        endpoint = urlsplit(str(token["api_endpoint"]))
+        #: The path `api_endpoint` names, e.g. `/storage/1.5/1`.
+        self.prefix = endpoint.path
+        self.host = endpoint.hostname or "localhost"
+        self.port = endpoint.port or (443 if endpoint.scheme == "https" else 80)
+
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: Any = None,
+        content: bytes | None = None,
+        content_type: str | None = None,
+        headers: dict[str, str] | None = None,
+        sign_payload: bool = True,
+        retry_on_conflict: bool = True,
+    ) -> httpx.Response:
+        """Sign and send. `path` is relative to `api_endpoint`.
+
+        A 503 is retried once after a pause, which is what `Retry-After` asks a
+        real client to do. Sync refuses a write that cannot move its
+        collection's timestamp past the last one, and against an in-process
+        SQLite file two writes land inside the same hundredth of a second far
+        more often than they do against a database across a network. Waiting
+        out the tick is the client's half of that protocol, not a workaround;
+        `retry_on_conflict=False` is for the tests that are checking the
+        refusal itself.
+        """
+        for attempt in range(2):
+            response = await self._send(
+                method,
+                path,
+                params=params,
+                json_body=json_body,
+                content=content,
+                content_type=content_type,
+                headers=headers,
+                sign_payload=sign_payload,
+            )
+            if response.status_code != 503 or not retry_on_conflict or attempt:
+                return response
+            await asyncio.sleep(0.02)
+        return response
+
+    async def _send(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: Any = None,
+        content: bytes | None = None,
+        content_type: str | None = None,
+        headers: dict[str, str] | None = None,
+        sign_payload: bool = True,
+    ) -> httpx.Response:
+        url = self.http.build_request(method, f"{self.prefix}{path}", params=params).url
+        resource = url.raw_path.decode("ascii")
+
+        body: bytes | None = content
+        if json_body is not None:
+            body = json.dumps(json_body, separators=(",", ":")).encode()
+            content_type = content_type or "application/json"
+        if body is not None and content_type is None:
+            content_type = "application/json"
+
+        authorization = hawk_storage_header(
+            token_id=self.token_id,
+            key=self.key,
+            method=method,
+            resource=resource,
+            host=self.host,
+            port=self.port,
+            body=body if (body is not None and sign_payload) else None,
+            content_type=content_type or "",
+        )
+        sent = {"authorization": authorization, **(headers or {})}
+        if content_type is not None:
+            sent["content-type"] = content_type
+        return await self.http.request(method, url, content=body, headers=sent)
+
+    async def get(self, path: str, **kwargs: Any) -> httpx.Response:
+        return await self.request("GET", path, **kwargs)
+
+    async def put(self, path: str, **kwargs: Any) -> httpx.Response:
+        return await self.request("PUT", path, **kwargs)
+
+    async def post(self, path: str, **kwargs: Any) -> httpx.Response:
+        return await self.request("POST", path, **kwargs)
+
+    async def delete(self, path: str, **kwargs: Any) -> httpx.Response:
+        return await self.request("DELETE", path, **kwargs)
+
+
+class SyncStorageError(Exception):
+    """Sync 1.5's whole error vocabulary: a status and one integer."""
+
+    def __init__(self, status_code: int, weave: Any) -> None:
+        super().__init__(f"{status_code} weave:{weave}")
+        self.status_code = status_code
+        self.weave = weave
+
+
+def expect_ok(response: httpx.Response) -> Any:
+    """Unwrap a storage response, or raise with the Weave code it carried."""
+    if response.status_code >= 400:
+        try:
+            weave = response.json()
+        except ValueError:
+            weave = response.text
+        raise SyncStorageError(response.status_code, weave)
+    return response.json()
