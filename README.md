@@ -8,9 +8,12 @@ See [plan.md](plan.md) for the design and the phase breakdown.
 
 ## Status
 
-Phases 0–2 done: config and signing keys, the crypto core pinned to the
-reference test vectors, and the accounts API — sign-in, key fetch, sessions and
-devices. OAuth, the sign-in page and Sync itself are still ahead.
+Phases 0–3 done: config and signing keys, the crypto core pinned to the
+reference test vectors, the accounts API — sign-in, key fetch, sessions and
+devices — and the OAuth tier: authorization codes with PKCE, JWT access tokens,
+refresh tokens, scoped-key metadata, the profile server and the two
+`.well-known` discovery documents. The sign-in page and Sync itself are still
+ahead.
 
 ## Usage
 

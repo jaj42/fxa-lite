@@ -27,3 +27,19 @@ signing_key = "signing-key.json"
 access_token = 21600
 authorization_code = 900
 tokenserver_token = 3600
+
+# OAuth clients. Firefox Desktop, Fenix and Firefox for iOS are registered
+# automatically with the ids and scopes the reference server gives them, so
+# most deployments need nothing here.
+#
+# An entry whose id matches a built-in replaces it wholesale — nothing is
+# merged, so whatever is written below is exactly what that client gets.
+#
+# [[clients]]
+# id = "0011223344556677"                 # 16 hex characters
+# name = "Thunderbird"
+# redirect_uris = ["https://mail.example.com/oauth"]
+# allowed_scopes = "https://identity.thunderbird.net/apps/sync"
+# trusted = true                          # may ask for scopes beyond profile:*
+# can_grant = true
+# public_client = true                    # PKCE required, no client secret

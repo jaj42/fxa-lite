@@ -195,3 +195,165 @@ def unexpected_error() -> FxaError:
         error="Internal Server Error",
         message="Unspecified error",
     )
+
+
+class OauthErrno:
+    """`OAUTH_ERRNO` — a **separate** numbering from `Errno` above.
+
+    The OAuth routes are a merged-in second service upstream, and they kept
+    their own error table: on `/v1/oauth/*`, `/v1/verify` and friends, `errno`
+    means what this class says, not what `Errno` says. `108` is "invalid token"
+    here and "missing parameter" there. The two never appear on one route, so
+    the ambiguity is the client's to resolve by knowing which endpoint it
+    called — which is exactly how the reference leaves it.
+    """
+
+    UNKNOWN_CLIENT = 101
+    INCORRECT_SECRET = 102
+    INCORRECT_REDIRECT = 103
+    INVALID_ASSERTION = 104
+    UNKNOWN_CODE = 105
+    INCORRECT_CODE = 106
+    EXPIRED_CODE = 107
+    INVALID_TOKEN = 108
+    INVALID_PARAMETER = 109
+    INVALID_RESPONSE_TYPE = 110
+    UNAUTHORIZED = 111
+    FORBIDDEN = 112
+    INVALID_CONTENT_TYPE = 113
+    INVALID_SCOPES = 114
+    EXPIRED_TOKEN = 115
+    NOT_PUBLIC_CLIENT = 116
+    INCORRECT_CODE_CHALLENGE = 117
+    MISSING_PKCE_PARAMETERS = 118
+    STALE_AUTH_AT = 119
+    MISMATCH_ACR_VALUES = 120
+    INVALID_GRANT_TYPE = 121
+    UNKNOWN_TOKEN = 122
+    SERVER_UNAVAILABLE = 201
+    DISABLED_CLIENT_ID = 202
+
+
+def _oauth_bad_request(errno: int, message: str, **extra: Any) -> FxaError:
+    return FxaError(code=400, errno=errno, error="Bad Request", message=message, **extra)
+
+
+def unknown_client(client_id: str) -> FxaError:
+    return _oauth_bad_request(OauthErrno.UNKNOWN_CLIENT, "Unknown client", clientId=client_id)
+
+
+def incorrect_redirect(redirect_uri: str | None) -> FxaError:
+    return _oauth_bad_request(
+        OauthErrno.INCORRECT_REDIRECT, "Incorrect redirect_uri", redirectUri=redirect_uri
+    )
+
+
+def unknown_code(code: str) -> FxaError:
+    return _oauth_bad_request(OauthErrno.UNKNOWN_CODE, "Unknown code", requestCode=code)
+
+
+def mismatch_code(code: str, client_id: str) -> FxaError:
+    return _oauth_bad_request(
+        OauthErrno.INCORRECT_CODE, "Incorrect code", requestCode=code, client=client_id
+    )
+
+
+def expired_code(code: str, expired_at: int) -> FxaError:
+    return _oauth_bad_request(
+        OauthErrno.EXPIRED_CODE, "Expired code", requestCode=code, expiredAt=expired_at
+    )
+
+
+def oauth_invalid_token() -> FxaError:
+    """400, not 401: on the OAuth tier a bad token is a bad parameter."""
+    return _oauth_bad_request(OauthErrno.INVALID_TOKEN, "Invalid token")
+
+
+def oauth_invalid_request_parameter(validation: Any = None) -> FxaError:
+    return _oauth_bad_request(
+        OauthErrno.INVALID_PARAMETER, "Invalid request parameter", validation=validation
+    )
+
+
+def invalid_response_type() -> FxaError:
+    return _oauth_bad_request(OauthErrno.INVALID_RESPONSE_TYPE, "Invalid response_type")
+
+
+def invalid_scopes(scopes: list[str]) -> FxaError:
+    return _oauth_bad_request(
+        OauthErrno.INVALID_SCOPES, "Requested scopes are not allowed", invalidScopes=scopes
+    )
+
+
+def not_public_client(client_id: str) -> FxaError:
+    return _oauth_bad_request(
+        OauthErrno.NOT_PUBLIC_CLIENT, "Not a public client", clientId=client_id
+    )
+
+
+def mismatch_code_challenge(pkce_hash: str | None) -> FxaError:
+    return _oauth_bad_request(
+        OauthErrno.INCORRECT_CODE_CHALLENGE, "Incorrect code_challenge", pkceHashValue=pkce_hash
+    )
+
+
+def missing_pkce_parameters() -> FxaError:
+    return _oauth_bad_request(
+        OauthErrno.MISSING_PKCE_PARAMETERS, "Public clients require PKCE OAuth parameters"
+    )
+
+
+def stale_auth_at(auth_at: int) -> FxaError:
+    return _oauth_bad_request(
+        OauthErrno.STALE_AUTH_AT, "Stale authentication timestamp", authAt=auth_at
+    )
+
+
+def invalid_grant_type() -> FxaError:
+    return _oauth_bad_request(OauthErrno.INVALID_GRANT_TYPE, "Invalid grant_type")
+
+
+def mismatch_acr_values(found: str) -> FxaError:
+    return _oauth_bad_request(
+        OauthErrno.MISMATCH_ACR_VALUES, "Mismatch acr value", foundValue=found
+    )
+
+
+def expired_token(expired_at: int) -> FxaError:
+    return _oauth_bad_request(OauthErrno.EXPIRED_TOKEN, "Expired token", expiredAt=expired_at)
+
+
+def unknown_token() -> FxaError:
+    return _oauth_bad_request(OauthErrno.UNKNOWN_TOKEN, "Unknown token")
+
+
+class ProfileErrno:
+    """A *third* errno table — the profile server's (`fxa-profile-server/lib/error.js`).
+
+    Only two values matter here. Insufficient scope has no errno of its own
+    upstream: hapi answers 403 and the translation layer stamps it 999. Reusing
+    `UNAUTHORIZED` and separating the two cases by status code says more.
+    """
+
+    UNAUTHORIZED = 100
+    INVALID_PARAMETER = 101
+
+
+def profile_unauthorized(reason: str | None = None) -> FxaError:
+    return FxaError(
+        code=401,
+        errno=ProfileErrno.UNAUTHORIZED,
+        error="Bad Request",
+        message="Unauthorized",
+        reason=reason,
+    )
+
+
+def insufficient_scope(required: list[str]) -> FxaError:
+    return FxaError(
+        code=403,
+        errno=ProfileErrno.UNAUTHORIZED,
+        error="Forbidden",
+        message="Insufficient scope",
+        requiredScope=required,
+    )

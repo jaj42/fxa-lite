@@ -297,7 +297,7 @@ As built:
   the two implementations agree, so a shared bug cannot hide. Every authenticated test runs twice,
   once per Authorization scheme. `ruff check` and `ty check` clean.
 
-### Phase 3 — OAuth, profile, discovery
+### Phase 3 — OAuth, profile, discovery ✅ done
 `GET /v1/jwks`, `POST /v1/oauth/authorization` (sessionToken-authed, PKCE S256, `keys_jwe`
 passthrough, service→scope resolution for `service=sync`), `POST /v1/oauth/token`
 (`authorization_code` + `refresh_token`, single-use codes, 15-min expiry),
@@ -308,6 +308,60 @@ passthrough, service→scope resolution for `service=sync`), `POST /v1/oauth/tok
 Collapse the internal `assertion` round-trip (`makeAssertionJWT` → `verifyAssertion`, HS256,
 60 s TTL) into a direct call — it exists upstream only because auth and oauth used to be separate
 services. Skip PPID, token-exchange, consent ledger, DAU metrics, subscriptions.
+
+As built:
+
+- `oauth/scopes.py` — `ScopeSet`, a port of `fxa-shared/oauth/scopes.ts`. Every access decision
+  in this phase is `contains()`, and the implication rules are subtle enough (`profilebogey` does
+  not imply `profile`; `profile:email:write` does not imply `profile:write`) that the upstream
+  precomputed-implicants design is reproduced rather than reinvented as prefix matching.
+  Iteration order is part of the contract — `getScopeValues` is `Object.keys` upstream, so a dict
+  and an ordered implicant tuple keep JS and Python agreeing. URL scopes are stricter than
+  `urlsplit` alone: upstream demands `new URL(value).href === value`, so `..` segments, uppercase
+  hosts, a `:443` port and the characters the WHATWG parser percent-encodes are all rejected here
+  by hand. The full spec tables live in `tests/vectors/scopes.json`.
+- `oauth/clients.py` — the client registry. Upstream it is a MySQL table behind an admin panel;
+  here the three browsers are built in with the ids, scopes and redirects `config/dev.json` gives
+  them, and `[[clients]]` in the config adds or **replaces** one. Replacement is wholesale on
+  purpose: a half-overridden client — new redirect, inherited scopes — is how a scope gets granted
+  by accident. Every client is public, so PKCE is mandatory and there is no `client_secret`
+  anywhere in the codebase.
+- `oauth/grant.py` — `SessionClaims` is the assertion payload, passed as an object. One deliberate
+  divergence: upstream's `strictScopeValidation` is off by default, so a trusted client asking for
+  an unregistered scope is granted it; fxa-lite turns it on and *drops* the scope instead. A
+  key-bearing scope outside the client's own allow-list is still a hard error (errno 114) — that
+  is the check standing between a relier and `kB`. The access token is a JWT with `typ: at+JWT`
+  and no server-side row; `jti` is therefore just a unique id rather than a table key.
+- `oauth/keys.py` — the signing key is read at `create_app` time, not lazily: a missing key should
+  stop the process, not surface as a 500 on the first sign-in. `paths.retired_key` publishes a
+  second public JWK so a rotation does not invalidate tokens signed a minute earlier.
+- `oauth/routes.py` — both route flavours. Authorization codes and refresh tokens are stored under
+  `sha256` of themselves, as upstream stores them, so a database leak yields nothing redeemable.
+  Abandoned codes are swept on the next authorization; there is no scheduler and the table is tiny.
+  `_redirect_with_code` works on the `urn:…:oauth-redirect-webchannel` sentinel, which is not a
+  location at all — the browser reads `code` and `state` off it instead of navigating.
+- Errors: the OAuth routes answer from `OauthErrno`, a *different* numbering from the accounts
+  API's — `108` is "invalid token" there and "missing parameter" here. That is upstream's own
+  arrangement, kept because clients depend on it. The profile server adds a third table. Pydantic
+  validation failures are routed to the right table by the matched route's tags.
+- `profile/` — the profile server, mounted at `/profile/v1`. Upstream answers each request with
+  two HTTP calls (`/v1/verify`, then `/v1/account/profile`); both are local here. Fields are gated
+  per scope, so a `profile:uid` token learns the uid and nothing else. No avatars and no display
+  names exist, so those keys are absent rather than empty — `display_name` answers 204, the same
+  answer the reference gives an account that never set one.
+- `wellknown.py` — the two discovery documents. The version segments are the trap: Firefox appends
+  `/v1` to the auth, OAuth and profile bases and `/1.0/sync/1.5` to the tokenserver base, so none
+  of them may carry it already. `pairing_server_base_uri` points at our own origin so a pairing
+  attempt fails visibly rather than reaching Mozilla's channelserver.
+- Two things the reference does that fxa-lite answers differently, both documented at the routes:
+  `/v1/oauth/destroy` cannot revoke an access token (there is no row to delete — it expires within
+  `ttl.access_token`), and `acr_values=AAL2` is refused with errno 120 rather than the errno that
+  sends a frontend off to a second-factor challenge that does not exist here.
+- Verified: 387 tests. `tests/conformance/client.py` grew the relier half of the flow — PKCE,
+  scoped-key derivation and a compact ECDH-ES JWE, all written out again from the protocol
+  description. `test_sync_flow_recovers_the_oldsync_key` walks password → `kB` → scoped-key-data →
+  `keys_jwe` → code → token → decrypt, and checks the recovered key against a derivation done
+  straight from `kB` and the account's own `keysChangedAt`. `ruff check` and `ty check` clean.
 
 ### Phase 4 — content server / WebChannel
 Static HTML + vanilla JS (WebCrypto for PBKDF2/HKDF — the browser does the password stretching,

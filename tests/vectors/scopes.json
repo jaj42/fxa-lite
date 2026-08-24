@@ -1,0 +1,119 @@
+{
+  "source": "packages/fxa-shared/test/oauth/scopes.js",
+  "note": "Transcribed verbatim from the reference ScopeSet spec. [A, B] pairs read as 'A contains B'.",
+  "valid_implications": [
+    ["profile:write", "profile"],
+    ["profile", "profile:email"],
+    ["profile:write", "profile:email"],
+    ["profile:write", "profile:email:write"],
+    ["profile:email:write", "profile:email"],
+    ["profile profile:email:write", "profile:email"],
+    ["profile profile:email:write", "profile:display_name"],
+    ["profile https://identity.mozilla.com/apps/oldsync", "profile"],
+    ["foo bar:baz", "foo:dee"],
+    ["foo bar:baz", "bar:baz"],
+    ["foo bar:baz", "foo:mah:pa bar:baz:quux"],
+    ["profile https://identity.mozilla.com/apps/oldsync", "https://identity.mozilla.com/apps/oldsync"],
+    ["https://identity.mozilla.com/apps/oldsync", "https://identity.mozilla.com/apps/oldsync#read"],
+    ["https://identity.mozilla.com/apps/oldsync", "https://identity.mozilla.com/apps/oldsync/bookmarks"],
+    ["https://identity.mozilla.com/apps/oldsync", "https://identity.mozilla.com/apps/oldsync/bookmarks#read"],
+    ["https://identity.mozilla.com/apps/oldsync#read", "https://identity.mozilla.com/apps/oldsync/bookmarks#read"],
+    ["https://identity.mozilla.com/apps/oldsync#read profile", "https://identity.mozilla.com/apps/oldsync/bookmarks#read"]
+  ],
+  "invalid_implications": [
+    ["profile:email:write", "profile"],
+    ["profile:email:write", "profile:write"],
+    ["profile:email", "profile:display_name"],
+    ["profilebogey", "profile"],
+    ["foo bar:baz", "bar"],
+    ["profile:write", "https://identity.mozilla.com/apps/oldsync"],
+    ["profile profile:email:write", "profile:write"],
+    ["https", "https://identity.mozilla.com/apps/oldsync"],
+    ["https://identity.mozilla.com/apps/oldsync", "profile"],
+    ["https://identity.mozilla.com/apps/oldsync#read", "https://identity.mozila.com/apps/oldsync/bookmarks"],
+    ["https://identity.mozilla.com/apps/oldsync#write", "https://identity.mozila.com/apps/oldsync/bookmarks#read"],
+    ["https://identity.mozilla.com/apps/oldsync/bookmarks", "https://identity.mozila.com/apps/oldsync"],
+    ["https://identity.mozilla.com/apps/oldsync/bookmarks", "https://identity.mozila.com/apps/oldsync/passwords"],
+    ["https://identity.mozilla.com/apps/oldsyncer", "https://identity.mozila.com/apps/oldsync"],
+    ["https://identity.mozilla.com/apps/oldsync", "https://identity.mozila.com/apps/oldsyncer"],
+    ["https://identity.mozilla.org/apps/oldsync", "https://identity.mozila.com/apps/oldsync"]
+  ],
+  "invalid_values": [
+    "profile:email!:write",
+    ":",
+    "::",
+    "profile+https://identity.mozilla.com/account/subscriptions",
+    ":profile",
+    "profile::email",
+    "profile profile\u0000:email",
+    "http://identity.mozilla.com/apps/oldsync",
+    "file:///etc/passwd",
+    "https://identity.mozilla.com/apps/oldsync/../notes",
+    "https://identity.mozilla.com/apps/oldsync/",
+    "https://identity.mozilla.com/apps/oldsync/#write",
+    "http://identity.mozilla.com/apps/oldsync#read!",
+    "http://identity.mozilla.com/apps/oldsync#read+write",
+    "http://identity.mozilla.com/apps/oldsync#read:write",
+    "http://identity.mozilla.com/apps/old:sync"
+  ],
+  "filtered": [
+    ["profile", "profile", "profile"],
+    ["profile", "profile:write", "profile"],
+    ["profile", "profile:email", ""],
+    ["profile basket", "profile", "profile"],
+    ["basket profile:email", "profile", "profile:email"],
+    ["basket profile:email:write", "profile:write basket", "basket profile:email:write"],
+    ["https://identity.mozilla.com/apps/oldsync#read", "profile https://identity.mozilla.com/apps/oldsync", "https://identity.mozilla.com/apps/oldsync#read"],
+    ["https://identity.mozilla.com/apps/oldsync/bookmarks#read https://identity.mozilla.com/apps/oldsync/passwords#write", "profile https://identity.mozilla.com/apps/oldsync", "https://identity.mozilla.com/apps/oldsync/bookmarks#read https://identity.mozilla.com/apps/oldsync/passwords#write"],
+    ["https://identity.mozilla.com/apps/oldsync/bookmarks#read https://identity.mozilla.com/apps/oldsync/passwords#write", "profile https://identity.mozilla.com/apps/oldsync#write", "https://identity.mozilla.com/apps/oldsync/passwords#write"]
+  ],
+  "intersections": [
+    ["profile", "profile"],
+    ["profile", "profile:write"],
+    ["profile:write", "profile"],
+    ["profile", "profile:email"],
+    ["profile basket", "profile"],
+    ["profile basket", "profile oauth"],
+    ["profile basket", "basket"],
+    ["profile basket", "basket:write"],
+    ["profile:write basket", "profile:write"]
+  ],
+  "non_intersections": [
+    ["profile", "basket"],
+    ["profile oauth", "basket"]
+  ],
+  "implicants": [
+    ["profile", "profile:write profile"],
+    ["profile:write", "profile:write"],
+    ["profile:email:write profile:amr", "profile:email:write profile:write profile:amr:write profile:amr profile"],
+    ["profile:email https://identity.mozilla.com/apps/oldsync", "profile:email:write profile:email profile:write profile https://identity.mozilla.com/apps/oldsync https://identity.mozilla.com/apps"],
+    ["https://identity.mozilla.com/apps/oldsync/bookmarks#read", "https://identity.mozilla.com/apps/oldsync/bookmarks https://identity.mozilla.com/apps/oldsync/bookmarks#read https://identity.mozilla.com/apps/oldsync https://identity.mozilla.com/apps/oldsync#read https://identity.mozilla.com/apps https://identity.mozilla.com/apps#read"]
+  ],
+  "unions": [
+    ["profile", "profile:email", "profile"],
+    ["profile:write https://identity.mozilla.com/apps/oldsync", "profile:write", "profile:write https://identity.mozilla.com/apps/oldsync"],
+    ["one two three", "two three four", "one two three four"],
+    ["one two:too three:won", "two:write three:to four", "one three:won two:write three:to four"]
+  ],
+  "differences": [
+    ["profile", "profile", ""],
+    ["profile:email", "profile", ""],
+    ["profile", "profile:email", "profile"],
+    ["profile:email clients:abcd", "profile:email profile:display_name clients", ""],
+    ["profile:email profile:display_name clients", "profile:email clients:abcd", "profile:display_name clients"],
+    ["profile:email profile:display_name", "profile:email", "profile:display_name"],
+    ["profile:write https://identity.mozilla.com/apps/oldsync", "profile:write", "https://identity.mozilla.com/apps/oldsync"],
+    ["profile:write https://identity.mozilla.com/apps/oldsync", "https://identity.mozilla.com/apps/oldsync", "profile:write"],
+    ["one two three", "two three four", "one"]
+  ],
+  "add_sequence": {
+    "start": "one",
+    "steps": [
+      [["two:too"], "one two:too"],
+      [["one", "three"], "one two:too three"],
+      [["one", "two:too:write"], "one three two:too:write"],
+      [["three", "two"], "one three two:too:write two"],
+      [["three:write", "two:write"], "one three:write two:write"]
+    ]
+  }
+}

@@ -15,15 +15,35 @@ import pytest
 from conformance.client import AuthClient
 from fxa_lite.app import create_app
 from fxa_lite.config import Config, from_dict
+from fxa_lite.crypto import jose
 from fxa_lite.db import Database, open_database
+from fxa_lite.oauth.keys import SigningKeys
 
 PASSWORD = "correct horse battery staple"
 EMAIL = "sync-user@example.com"
+PUBLIC_URL = "http://fxa.example.com"
 
 
 @pytest.fixture
 def config() -> Config:
-    return from_dict({"public_url": "http://fxa.example.com"})
+    return from_dict({"public_url": PUBLIC_URL})
+
+
+@pytest.fixture(scope="session")
+def signing_keys() -> SigningKeys:
+    """One RSA key for the whole run.
+
+    Generating 2048 bits per test would dominate the suite's runtime, and no
+    test cares *which* key signs — only that the same one verifies.
+    """
+    key = jose.generate_signing_key()
+    jwk = jose.private_key_to_jwk(key)
+    return SigningKeys(
+        private=key,
+        kid=jwk["kid"],
+        verifiers={jwk["kid"]: key.public_key()},
+        jwks={"keys": [jose.public_jwk(jwk)]},
+    )
 
 
 @pytest.fixture
@@ -36,14 +56,14 @@ def db() -> Iterator[Database]:
 
 
 @pytest.fixture
-def app(config: Config, db: Database):
-    return create_app(config, db=db)
+def app(config: Config, db: Database, signing_keys: SigningKeys):
+    return create_app(config, db=db, signing_keys=signing_keys)
 
 
 @pytest.fixture
 async def http(app) -> AsyncIterator[httpx.AsyncClient]:
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://fxa.example.com") as client:
+    async with httpx.AsyncClient(transport=transport, base_url=PUBLIC_URL) as client:
         yield client
 
 

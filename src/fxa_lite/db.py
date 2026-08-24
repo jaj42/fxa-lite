@@ -179,6 +179,41 @@ class KeyFetchToken:
 
 
 @dataclass(frozen=True, slots=True)
+class OauthCode:
+    """A single-use authorization code, stored under `sha256(code)`.
+
+    The code itself is never written down: the client holds it, and a database
+    leak must not let anyone redeem it. `auth_at` is milliseconds like every
+    other timestamp here, even though it leaves as seconds in `auth_at` /
+    `auth_time`.
+    """
+
+    code: str
+    uid: str
+    client_id: str
+    scope: str
+    created_at: int
+    auth_at: int
+    code_challenge: str | None
+    code_challenge_method: str | None
+    keys_jwe: str | None
+    session_token_id: str | None
+    offline: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RefreshToken:
+    """A long-lived grant, stored under `sha256(token)` for the same reason."""
+
+    token_id: str
+    uid: str
+    client_id: str
+    scope: str
+    created_at: int
+    last_used_at: int
+
+
+@dataclass(frozen=True, slots=True)
 class Device:
     id: str
     uid: str
@@ -408,6 +443,86 @@ class Database:
     def delete_key_fetch_token(self, token_id: str) -> bool:
         cursor = self.connection.execute(
             "DELETE FROM key_fetch_tokens WHERE token_id = ?", (token_id,)
+        )
+        return cursor.rowcount > 0
+
+    # -- oauth codes ----------------------------------------------------------
+
+    def create_oauth_code(self, code: OauthCode) -> OauthCode:
+        row = _as_row(code)
+        row["offline"] = int(code.offline)
+        self.connection.execute(
+            """
+            INSERT INTO oauth_codes (
+                code, uid, client_id, scope, created_at, auth_at, code_challenge,
+                code_challenge_method, keys_jwe, session_token_id, offline
+            ) VALUES (
+                :code, :uid, :client_id, :scope, :created_at, :auth_at, :code_challenge,
+                :code_challenge_method, :keys_jwe, :session_token_id, :offline
+            )
+            """,
+            row,
+        )
+        return code
+
+    def oauth_code(self, code_id: str) -> OauthCode | None:
+        row = self.connection.execute(
+            "SELECT * FROM oauth_codes WHERE code = ?", (code_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        values = dict(row)
+        values["offline"] = bool(values["offline"])
+        return OauthCode(**values)
+
+    def delete_oauth_code(self, code_id: str) -> bool:
+        cursor = self.connection.execute("DELETE FROM oauth_codes WHERE code = ?", (code_id,))
+        return cursor.rowcount > 0
+
+    def delete_expired_oauth_codes(self, before: int) -> int:
+        """Codes are single-use and short-lived; unredeemed ones are just litter."""
+        cursor = self.connection.execute(
+            "DELETE FROM oauth_codes WHERE created_at < ?", (before,)
+        )
+        return cursor.rowcount
+
+    # -- refresh tokens -------------------------------------------------------
+
+    def create_refresh_token(self, token: RefreshToken) -> RefreshToken:
+        self.connection.execute(
+            """
+            INSERT INTO refresh_tokens (
+                token_id, uid, client_id, scope, created_at, last_used_at
+            ) VALUES (
+                :token_id, :uid, :client_id, :scope, :created_at, :last_used_at
+            )
+            """,
+            _as_row(token),
+        )
+        return token
+
+    def refresh_token(self, token_id: str) -> RefreshToken | None:
+        return _one(
+            RefreshToken,
+            self.connection.execute(
+                "SELECT * FROM refresh_tokens WHERE token_id = ?", (token_id,)
+            ),
+        )
+
+    def refresh_tokens(self, uid: str) -> list[RefreshToken]:
+        rows = self.connection.execute(
+            "SELECT * FROM refresh_tokens WHERE uid = ? ORDER BY created_at", (uid,)
+        )
+        return [RefreshToken(**dict(row)) for row in rows]
+
+    def touch_refresh_token(self, token_id: str, at: int) -> None:
+        self.connection.execute(
+            "UPDATE refresh_tokens SET last_used_at = ? WHERE token_id = ?", (at, token_id)
+        )
+
+    def delete_refresh_token(self, token_id: str) -> bool:
+        cursor = self.connection.execute(
+            "DELETE FROM refresh_tokens WHERE token_id = ?", (token_id,)
         )
         return cursor.rowcount > 0
 

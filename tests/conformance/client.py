@@ -6,19 +6,34 @@ protocol description rather than imported from `fxa_lite.crypto`, so that a
 mistake in one implementation shows up as a test failure instead of as two
 modules agreeing on the wrong answer.
 
-The HKDF, PBKDF2 and XOR below are therefore *intentional* duplication.
+Phase 3 adds the relier half of the OAuth flow, ported from
+`libs/vendored/crypto-relier/src/lib/deriver/{scoped-keys,deriver-utils}.ts`:
+PKCE, scoped-key derivation, and the compact ECDH-ES JWE a client builds to
+carry its scoped keys home.
+
+The HKDF, PBKDF2, XOR, concat-KDF and JWE below are therefore *intentional*
+duplication.  Only `cryptography`'s primitives are shared with the server, and
+only where the stdlib has no equivalent.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
+import json
+import os
 import secrets
+import struct
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 NAMESPACE = "identity.mozilla.com/picl/v1/"
 V1_ITERATIONS = 1000
@@ -132,6 +147,163 @@ def unwrap_kb(wrap_kb: bytes, unwrap_b_key: bytes) -> bytes:
     return xor(wrap_kb, unwrap_b_key)
 
 
+
+
+# --------------------------------------------------------------------------
+# The relier half of the OAuth flow.
+# --------------------------------------------------------------------------
+
+OLDSYNC_SCOPE = "https://identity.mozilla.com/apps/oldsync"
+FIREFOX_DESKTOP_CLIENT_ID = "5882386c6d801776"
+WEBCHANNEL_REDIRECT = "urn:ietf:wg:oauth:2.0:oob:oauth-redirect-webchannel"
+
+
+def b64u(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def unb64u(data: str) -> bytes:
+    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+
+
+def pkce_pair() -> tuple[str, str]:
+    """RFC 7636 S256: a random verifier and the challenge derived from it."""
+    verifier = b64u(os.urandom(32))
+    return verifier, b64u(hashlib.sha256(verifier.encode("ascii")).digest())
+
+
+def derive_scoped_key(
+    *,
+    scope: str,
+    kb: bytes,
+    uid: str,
+    key_rotation_secret: str,
+    key_rotation_timestamp: int,
+) -> dict[str, Any]:
+    """`scoped-keys.ts`, written out again from the protocol description.
+
+    Sync is the legacy path — 64 bytes from `kB` alone, with a `kid` naming a
+    hash of `kB` — and every other scope is the general one, salted with the uid.
+    """
+    if scope in (OLDSYNC_SCOPE, "https://identity.thunderbird.net/apps/sync"):
+        key_material = hkdf(kb, kw("oldsync"), 64)
+        return {
+            "kty": "oct",
+            "scope": scope,
+            "k": b64u(key_material),
+            "kid": f"{key_rotation_timestamp}-{b64u(hashlib.sha256(kb).digest()[:16])}",
+        }
+    key_material = hkdf(
+        kb + bytes.fromhex(key_rotation_secret),
+        f"{NAMESPACE}scoped_key\n{scope}".encode(),
+        48,
+        salt=bytes.fromhex(uid),
+    )
+    seconds = round(key_rotation_timestamp / 1000)
+    return {
+        "kty": "oct",
+        "scope": scope,
+        "k": b64u(key_material[16:48]),
+        "kid": f"{seconds}-{b64u(key_material[0:16])}",
+    }
+
+
+def concat_kdf(shared: bytes, algorithm: bytes, length: int = 32) -> bytes:
+    """NIST SP 800-56A single-step KDF as RFC 7518 §4.6.2 profiles it."""
+
+    def prefixed(value: bytes) -> bytes:
+        return struct.pack(">I", len(value)) + value
+
+    suffix = prefixed(algorithm) + prefixed(b"") + prefixed(b"") + struct.pack(">I", length * 8)
+    out, counter = b"", 1
+    while len(out) < length:
+        out += hashlib.sha256(struct.pack(">I", counter) + shared + suffix).digest()
+        counter += 1
+    return out[:length]
+
+
+def generate_relier_keypair() -> ec.EllipticCurvePrivateKey:
+    """The P-256 key a client generates so scoped keys can be sent to it."""
+    return ec.generate_private_key(ec.SECP256R1())
+
+
+def public_jwk(key: ec.EllipticCurvePrivateKey) -> dict[str, str]:
+    numbers = key.public_key().public_numbers()
+    return {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": b64u(numbers.x.to_bytes(32, "big")),
+        "y": b64u(numbers.y.to_bytes(32, "big")),
+    }
+
+
+def jwe_encrypt_ecdh_es(recipient_jwk: dict[str, str], plaintext: bytes) -> str:
+    """Compact JWE, `alg=ECDH-ES`, `enc=A256GCM` — what `keys_jwe` is."""
+    recipient = ec.EllipticCurvePublicNumbers(
+        x=int.from_bytes(unb64u(recipient_jwk["x"]), "big"),
+        y=int.from_bytes(unb64u(recipient_jwk["y"]), "big"),
+        curve=ec.SECP256R1(),
+    ).public_key()
+    ephemeral = ec.generate_private_key(ec.SECP256R1())
+    cek = concat_kdf(ephemeral.exchange(ec.ECDH(), recipient), b"A256GCM")
+    header = {
+        "alg": "ECDH-ES",
+        "enc": "A256GCM",
+        "epk": public_jwk(ephemeral),
+    }
+    protected = b64u(json.dumps(header, separators=(",", ":")).encode())
+    iv = os.urandom(12)
+    sealed = AESGCM(cek).encrypt(iv, plaintext, protected.encode("ascii"))
+    return f"{protected}..{b64u(iv)}.{b64u(sealed[:-16])}.{b64u(sealed[-16:])}"
+
+
+def jwe_decrypt_ecdh_es(jwe: str, key: ec.EllipticCurvePrivateKey) -> bytes:
+    protected, encrypted_key, iv, ciphertext, tag = jwe.split(".")
+    assert encrypted_key == "", "ECDH-ES direct agreement wraps no key"
+    header = json.loads(unb64u(protected))
+    epk = header["epk"]
+    peer = ec.EllipticCurvePublicNumbers(
+        x=int.from_bytes(unb64u(epk["x"]), "big"),
+        y=int.from_bytes(unb64u(epk["y"]), "big"),
+        curve=ec.SECP256R1(),
+    ).public_key()
+    cek = concat_kdf(key.exchange(ec.ECDH(), peer), header["enc"].encode("ascii"))
+    return AESGCM(cek).decrypt(unb64u(iv), unb64u(ciphertext) + unb64u(tag), protected.encode())
+
+
+def decode_jwt(token: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Header and claims, unverified. Use `verify_jwt` before trusting either."""
+    header, payload, _ = token.split(".")
+    return json.loads(unb64u(header)), json.loads(unb64u(payload))
+
+
+def verify_jwt(token: str, jwks: dict[str, Any]) -> dict[str, Any]:
+    """Verify an RS256 JWT against a JWKS document, the way a relier would.
+
+    This is the check the Sync tokenserver will make in phase 5, so it is worth
+    a client that does it independently: it proves `/v1/jwks` publishes the key
+    that actually signed the token.
+    """
+    header, claims = decode_jwt(token)
+    assert header["alg"] == "RS256", header
+    jwk = next(candidate for candidate in jwks["keys"] if candidate["kid"] == header["kid"])
+    public = rsa.RSAPublicNumbers(
+        e=int.from_bytes(unb64u(jwk["e"]), "big"),
+        n=int.from_bytes(unb64u(jwk["n"]), "big"),
+    ).public_key()
+    signing_input, signature = token.rsplit(".", 1)
+    try:
+        public.verify(
+            unb64u(signature),
+            signing_input.encode("ascii"),
+            padding.PKCS1v15(),
+            hashes.SHA256(),
+        )
+    except InvalidSignature as exc:
+        raise ValueError("bad JWT signature") from exc
+    return claims
+
+
 class ClientError(Exception):
     """An FxA error envelope, raised as an exception. `errno` is the useful part."""
 
@@ -160,9 +332,19 @@ class AuthClient:
         payload: Any = None,
         headers: dict[str, str] | None = None,
     ) -> Any:
-        response = await self.http.request(
-            method, f"{self.prefix}{path}", json=payload, headers=headers
-        )
+        return await self.raw_request(method, f"{self.prefix}{path}", payload, headers)
+
+    async def raw_request(
+        self,
+        method: str,
+        path: str,
+        payload: Any = None,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        """As `request`, but `path` is absolute — the profile server is not under /v1."""
+        response = await self.http.request(method, path, json=payload, headers=headers)
+        if response.status_code == 204:
+            return None
         try:
             body = response.json()
         except ValueError as exc:  # pragma: no cover - a non-JSON body is a bug
@@ -294,6 +476,149 @@ class AuthClient:
         return await self.authed(
             "POST", "/account/device/destroy", session_token, "sessionToken", {"id": device_id}
         )
+
+    # -- oauth ----------------------------------------------------------------
+
+    async def oauth_authorization(self, session_token: str, **payload: Any) -> Any:
+        return await self.authed(
+            "POST", "/oauth/authorization", session_token, "sessionToken", payload
+        )
+
+    async def oauth_token(self, **payload: Any) -> Any:
+        return await self.request("POST", "/oauth/token", payload)
+
+    async def scoped_key_data(self, session_token: str, client_id: str, scope: str) -> Any:
+        return await self.authed(
+            "POST",
+            "/account/scoped-key-data",
+            session_token,
+            "sessionToken",
+            {"client_id": client_id, "scope": scope},
+        )
+
+    async def jwks(self) -> Any:
+        return await self.request("GET", "/jwks")
+
+    async def client_info(self, client_id: str) -> Any:
+        return await self.request("GET", f"/client/{client_id}")
+
+    async def verify_token(self, access_token: str) -> Any:
+        return await self.request("POST", "/verify", {"token": access_token})
+
+    async def introspect(self, token: str, token_type_hint: str | None = None) -> Any:
+        payload: dict[str, Any] = {"token": token}
+        if token_type_hint:
+            payload["token_type_hint"] = token_type_hint
+        return await self.request("POST", "/introspect", payload)
+
+    async def destroy_token(self, token: str, **payload: Any) -> Any:
+        return await self.request("POST", "/oauth/destroy", {"token": token, **payload})
+
+    # -- profile --------------------------------------------------------------
+
+    async def profile(self, access_token: str, path: str = "/profile") -> Any:
+        return await self.raw_request(
+            "GET", f"/profile/v1{path}", headers={"authorization": f"Bearer {access_token}"}
+        )
+
+    # -- discovery ------------------------------------------------------------
+
+    async def client_configuration(self) -> Any:
+        return await self.raw_request("GET", "/.well-known/fxa-client-configuration")
+
+    async def openid_configuration(self) -> Any:
+        return await self.raw_request("GET", "/.well-known/openid-configuration")
+
+    # -- the whole flow -------------------------------------------------------
+
+    async def sync_sign_in(
+        self,
+        email: str,
+        password: str,
+        *,
+        client_id: str = FIREFOX_DESKTOP_CLIENT_ID,
+        scope: str | None = None,
+        service: str | None = "sync",
+        access_type: str = "offline",
+    ) -> SyncGrant:
+        """Everything a browser does between "password typed" and "has a Sync key".
+
+        Sign in with `keys=true`, fetch and unwrap `kB`, ask which key rotation
+        the scopes are on, derive the scoped keys, seal them to a freshly
+        generated P-256 key, exchange the lot for a code and then a token, and
+        finally open the `keys_jwe` that came back.
+        """
+        account = await self.sign_in(email, password, keys=True)
+        keys = await self.account_keys(account["keyFetchToken"], account["unwrapBKey"])
+        session_token = account["sessionToken"]
+        uid = account["uid"]
+
+        key_scope = scope or OLDSYNC_SCOPE
+        metadata = await self.scoped_key_data(session_token, client_id, key_scope)
+        scoped_keys = {
+            value: derive_scoped_key(
+                scope=value,
+                kb=keys["kB"],
+                uid=uid,
+                key_rotation_secret=entry["keyRotationSecret"],
+                key_rotation_timestamp=entry["keyRotationTimestamp"],
+            )
+            for value, entry in metadata.items()
+        }
+
+        relier_key = generate_relier_keypair()
+        keys_jwe = jwe_encrypt_ecdh_es(
+            public_jwk(relier_key), json.dumps(scoped_keys, separators=(",", ":")).encode()
+        )
+        verifier, challenge = pkce_pair()
+        state = b64u(os.urandom(16))
+        authorization = await self.oauth_authorization(
+            session_token,
+            client_id=client_id,
+            state=state,
+            access_type=access_type,
+            code_challenge=challenge,
+            code_challenge_method="S256",
+            keys_jwe=keys_jwe,
+            **({"scope": scope} if scope else {}),
+            **({"service": service} if service and not scope else {}),
+        )
+        token = await self.oauth_token(
+            client_id=client_id,
+            code=authorization["code"],
+            code_verifier=verifier,
+        )
+        recovered = json.loads(jwe_decrypt_ecdh_es(token["keys_jwe"], relier_key))
+        return SyncGrant(
+            account=account,
+            keys=keys,
+            session_token=session_token,
+            state=state,
+            authorization=authorization,
+            token=token,
+            scoped_keys=scoped_keys,
+            recovered_keys=recovered,
+        )
+
+
+@dataclass(frozen=True)
+class SyncGrant:
+    """Everything `sync_sign_in` collected, for a test to make assertions about."""
+
+    account: dict[str, Any]
+    keys: dict[str, bytes]
+    session_token: str
+    state: str
+    authorization: dict[str, Any]
+    token: dict[str, Any]
+    #: What the client derived before sealing it into `keys_jwe`.
+    scoped_keys: dict[str, Any]
+    #: What came back out of the `keys_jwe` the server echoed.
+    recovered_keys: dict[str, Any]
+
+    @property
+    def access_token(self) -> str:
+        return self.token["access_token"]
 
 
 def _with_keys(path: str, keys: bool) -> str:

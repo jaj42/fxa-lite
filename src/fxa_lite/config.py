@@ -13,6 +13,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .oauth.clients import Client, ClientError
+from .oauth.clients import build as build_clients
+
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9000
 
@@ -60,6 +63,8 @@ class Config:
     ttl: TtlConfig = field(default_factory=TtlConfig)
     #: HMAC secret shared between the tokenserver and sync storage tiers.
     tokenserver_shared_secret: str | None = None
+    #: OAuth clients: the three browsers, plus anything `[[clients]]` adds.
+    clients: tuple[Client, ...] = ()
     #: Config file this was loaded from, if any.
     source: Path | None = None
 
@@ -87,7 +92,11 @@ def from_dict(
     data: dict[str, Any], *, base: Path | None = None, source: Path | None = None
 ) -> Config:
     base = Path(base) if base is not None else Path.cwd()
-    _reject_unknown(data, {"public_url", "tokenserver_shared_secret", "listen", "paths", "ttl"}, "")
+    _reject_unknown(
+        data,
+        {"public_url", "tokenserver_shared_secret", "clients", "listen", "paths", "ttl"},
+        "",
+    )
 
     public_url = _public_url(_require(data, "public_url", str, ""))
     listen_raw = _section(data, "listen")
@@ -116,6 +125,16 @@ def from_dict(
         authorization_code=_seconds(ttl_raw, "authorization_code", DEFAULT_CODE_TTL),
         tokenserver_token=_seconds(ttl_raw, "tokenserver_token", DEFAULT_TOKENSERVER_TTL),
     )
+    clients_raw = data.get("clients", [])
+    if not isinstance(clients_raw, list) or not all(
+        isinstance(entry, dict) for entry in clients_raw
+    ):
+        raise ConfigError("clients must be an array of tables ([[clients]])")
+    try:
+        clients = build_clients(public_url, clients_raw)
+    except (ClientError, ValueError) as exc:
+        raise ConfigError(str(exc)) from exc
+
     secret = data.get("tokenserver_shared_secret")
     if secret is not None and (not isinstance(secret, str) or not secret):
         raise ConfigError("tokenserver_shared_secret must be a non-empty string")
@@ -126,6 +145,7 @@ def from_dict(
         paths=paths,
         ttl=ttl,
         tokenserver_shared_secret=secret,
+        clients=clients,
         source=source,
     )
 
