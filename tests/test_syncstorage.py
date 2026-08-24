@@ -365,6 +365,66 @@ async def test_a_batch_accumulates_across_several_posts(
     assert len({item["modified"] for item in records.values()}) == 1
 
 
+async def test_a_commit_may_carry_records_of_its_own(
+    storage: SyncStorageClient,
+) -> None:
+    """The shape every Firefox history upload actually has.
+
+    A client is not supposed to send records with the commit, and Firefox
+    sends them every time. They are written after the batch lands, at the same
+    instant — which used to make the request conflict with the timestamp its
+    own commit had just set, and answer 503 to a perfectly good upload.
+
+    `retry_on_conflict=False` because the client's retry is exactly what hid
+    this: the second attempt falls in a later hundredth and succeeds, so the
+    only trace of the bug in a passing test run was that it took two round
+    trips.
+    """
+    opened = await storage.post(
+        "/storage/history",
+        params={"batch": "true"},
+        json_body=[{"id": "staged", "payload": "1"}],
+        retry_on_conflict=False,
+    )
+    batch = opened.json()["batch"]
+
+    committed = await storage.post(
+        "/storage/history",
+        params={"batch": batch, "commit": "true"},
+        json_body=[{"id": "carried", "payload": "2"}],
+        retry_on_conflict=False,
+    )
+    assert committed.status_code == 200, committed.text
+    assert committed.json()["success"] == ["carried"]
+
+    full = await storage.get("/storage/history", params={"full": ""})
+    records = {item["id"]: item for item in full.json()}
+    assert sorted(records) == ["carried", "staged"]
+    # Staged and carried alike land at the one instant the commit defines.
+    assert len({item["modified"] for item in records.values()}) == 1
+
+
+async def test_a_commit_carrying_a_staged_id_takes_the_later_copy(
+    storage: SyncStorageClient,
+) -> None:
+    """Written *after* the batch, so the copy sent with the commit wins."""
+    opened = await storage.post(
+        "/storage/history",
+        params={"batch": "true"},
+        json_body=[{"id": "a", "payload": "staged"}],
+        retry_on_conflict=False,
+    )
+    batch = opened.json()["batch"]
+    await storage.post(
+        "/storage/history",
+        params={"batch": batch, "commit": "true"},
+        json_body=[{"id": "a", "payload": "carried"}],
+        retry_on_conflict=False,
+    )
+    full = await storage.get("/storage/history", params={"full": ""})
+    assert [item["payload"] for item in full.json()] == ["carried"]
+
+
 async def test_batch_and_commit_together_is_just_a_post(
     storage: SyncStorageClient,
 ) -> None:

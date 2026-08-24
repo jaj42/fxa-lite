@@ -730,13 +730,24 @@ source and each one is a sentence in phase 12:
   It was not in the plan at all: the reference merges devices, sessions and authorized OAuth
   clients into one flat list (`lib/routes/attached-clients.js`, `ConnectedServicesFactory`), and
   every input already exists here. There is a simpler sibling, `GET /account/attached_oauth_clients`.
+- **A batch commit that carries records answered 503.** Firefox uploads history as ~17 staged
+  POSTs and a commit, and puts records in the commit request too. `_post_batch` lands the batch
+  (which stamps the collection at `now`) and then calls `post_bsos` for the carried records,
+  whose first act is the `check_write` guard — so the request conflicted with the timestamp its
+  own commit had just set, and history never landed. Two things hid it: every batch test commits
+  with an empty body, and the conformance client retries a 503, so the bug's only symptom in a
+  green test run was an extra round trip. `post_bsos` now takes `stamped=True` on that one path.
 - **One divergence found on the way past**: `_refresh_token_grant` widened a trusted client's
   scope to `scope ∪ client.allowedScopes`, omitting `TRUSTED_CLIENT_ALLOWED_SCOPES`
   (`openid`, `profile`, `email`, `profile:subscriptions` — `lib/oauth/grant.js`).
   `validate_requested_grant` had it right; only the refresh path did not.
 
-Still open: whether Sync itself completes once tokens are minted (no tokenserver or storage
-request has been observed yet), `attached_clients`, and the whole Fenix half.
+Sync now runs: tokenserver, `info/collections`, `meta/global`, `crypto/keys`, and uploads of
+clients, prefs, tabs, bookmarks, addons and history all succeed against a real Firefox Desktop.
+
+Still open: `GET /v1/account/attached_clients`, `POST /v1/account/devices/notify` (Firefox calls
+it after uploading the clients collection; push and Send Tab are out of scope, so the question is
+what a server without them should answer rather than what to implement), and the whole Fenix half.
 
 ### Phase 9 — harden `crypto/jose.py` ✅ done
 

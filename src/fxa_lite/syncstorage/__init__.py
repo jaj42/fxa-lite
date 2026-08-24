@@ -442,8 +442,10 @@ def _post_batch(
     if bsos.valid:
         # Records sent *with* the commit are newer than anything staged under
         # the same id, so they are written after the batch lands rather than
-        # into it. A client should not send them; clients do.
-        modified = store.post_bsos(collection, bsos.valid)
+        # into it. A client should not send them; Firefox does, on every
+        # history upload. `stamped` is what keeps the second write from
+        # colliding with the timestamp the commit just set.
+        modified = store.post_bsos(collection, bsos.valid, stamped=True)
     return _json(
         {"success": success, "failed": failed, "modified": timestamp_json(modified)},
         headers={"X-Last-Modified": timestamp_header(modified)},

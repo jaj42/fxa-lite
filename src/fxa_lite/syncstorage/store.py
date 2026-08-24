@@ -466,10 +466,19 @@ class SyncStore:
             return self.now
         return self.update_collection(collection_id)
 
-    def post_bsos(self, collection: str, bsos: Sequence[Any]) -> int:
-        """Write a list of records at one instant and stamp the collection once."""
+    def post_bsos(self, collection: str, bsos: Sequence[Any], *, stamped: bool = False) -> int:
+        """Write a list of records at one instant and stamp the collection once.
+
+        `stamped` says this transaction has already moved the collection to
+        `now`, which is true on exactly one path: a batch commit that also
+        carries records.  There the guard has been satisfied by the commit
+        itself, and applying it again makes the request conflict with its own
+        write — the records land at the same instant as the batch, which is
+        what a caller sending them with the commit asked for.
+        """
         collection_id = self.get_or_create_collection_id(collection)
-        self.check_write(collection_id)
+        if not stamped:
+            self.check_write(collection_id)
         for bso in bsos:
             self.put_bso(
                 collection,
