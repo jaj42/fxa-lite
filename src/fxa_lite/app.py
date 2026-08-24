@@ -11,6 +11,10 @@ so the layout is ours to choose; see `wellknown.py`.
 The content router is included last, and `/` belongs to it: that is the URL
 Firefox opens to sign in.
 
+`tracing.Trace` wraps the lot. At the default log level it does nothing; at
+`debug` it writes a redacted rendering of every request and response, which is
+the only practical way to see why a client the size of Firefox is unhappy.
+
 The error handlers matter as much as the routes.  A client reads `errno`, not
 the HTTP status, so an unhandled exception that escapes as FastAPI's default
 `{"detail": ...}` is not "a 500 with a different body" — it is a response the
@@ -30,7 +34,17 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from starlette.exceptions import HTTPException
 
-from . import __version__, auth, content, errors, profile, syncstorage, tokenserver, wellknown
+from . import (
+    __version__,
+    auth,
+    content,
+    errors,
+    profile,
+    syncstorage,
+    tokenserver,
+    tracing,
+    wellknown,
+)
 from .config import Config
 from .db import Database, open_database
 from .oauth import routes as oauth_routes
@@ -102,6 +116,10 @@ def create_app(
     app.include_router(syncstorage.router, prefix=STORAGE_PREFIX)
     app.include_router(wellknown.router)
     app.include_router(content.router)
+    # Outermost, so a request that never reaches a route is still described and
+    # the status a handler actually produced is the one recorded. It renders
+    # nothing unless the `fxa_lite` logger is at DEBUG.
+    app.add_middleware(tracing.Trace)
     _add_defaults(app, config)
     _add_error_handlers(app)
     return app

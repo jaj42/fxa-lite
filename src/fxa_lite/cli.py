@@ -18,8 +18,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import __version__, accounts
-from .config import Config, ConfigError, load
+from . import __version__, accounts, tracing
+from .config import LOG_LEVELS, Config, ConfigError, load
 from .crypto import jose
 from .db import Database, DatabaseError, open_database
 from .errors import FxaError
@@ -71,6 +71,12 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, help="override [listen] port")
     serve.add_argument(
         "--reload", action="store_true", help="restart on source changes (development)"
+    )
+    serve.add_argument(
+        "--log-level",
+        choices=LOG_LEVELS,
+        help="override [log] level; `debug` traces request and response bodies "
+        "(credentials are redacted, but the output is still not for sharing)",
     )
     serve.set_defaults(handler=cmd_serve)
 
@@ -141,6 +147,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
     from .app import create_app
 
     config: Config = load(args.config)
+    level = args.log_level or config.log.level
+    tracing.configure(level)
     if not config.paths.signing_key.exists():
         print(
             f"no signing key at {config.paths.signing_key}; run `fxa-lite keygen` first",
@@ -154,6 +162,12 @@ def cmd_serve(args: argparse.Namespace) -> int:
     host = args.host or config.listen.host
     port = args.port or config.listen.port
     print(f"fxa-lite {__version__} serving {config.public_url} on {host}:{port}")
+    if level == "debug":
+        print(
+            "tracing request and response bodies; credentials are redacted, "
+            "but treat the output as sensitive",
+            file=sys.stderr,
+        )
     uvicorn.run(create_app(config), host=host, port=port, reload=args.reload)
     return 0
 

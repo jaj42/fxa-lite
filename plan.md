@@ -742,12 +742,44 @@ source and each one is a sentence in phase 12:
   (`openid`, `profile`, `email`, `profile:subscriptions` — `lib/oauth/grant.js`).
   `validate_requested_grant` had it right; only the refresh path did not.
 
-Sync now runs: tokenserver, `info/collections`, `meta/global`, `crypto/keys`, and uploads of
-clients, prefs, tabs, bookmarks, addons and history all succeed against a real Firefox Desktop.
+- **Debugging this needed a tool that did not exist**, and building it three times as a throwaway
+  proxy is how you learn to build it once. An access log line says a request was a 400; every
+  question in this phase was "which field", and the answer is two lines of JSON that never reach
+  the terminal. `tracing.py` is that proxy made permanent: a pure-ASGI middleware, installed
+  outermost, that renders each request and response at `DEBUG` and costs one `isEnabledFor` call
+  otherwise. It is safe to ship enabled-by-config because it redacts by key name before writing —
+  `authPW`, session and key-fetch tokens, access and refresh tokens, `keys_jwe`, `bundle`,
+  `unwrapBKey`, `code`, Sync `payload` — down to a prefix and a length. The prefix is what lets
+  two log lines be matched against each other, which is the only reason to want the value at all.
+  A value of 16 characters or fewer collapses entirely, because eight characters of a short
+  secret is most of it. The `Authorization` header keeps its scheme (`Hawk` vs `Bearer` is
+  frequently the bug) and loses its credential. Phase 10 should treat `SECRET_KEYS` as an audit
+  item: the redaction is exactly as good as that list, and a key added to a route without being
+  added there is a credential written to a file.
 
-Still open: `GET /v1/account/attached_clients`, `POST /v1/account/devices/notify` (Firefox calls
-it after uploading the clients collection; push and Send Tab are out of scope, so the question is
-what a server without them should answer rather than what to implement), and the whole Fenix half.
+**Done in this phase.** Firefox Desktop signs in and syncs against fxa-lite, end to end:
+tokenserver, `info/collections`, `info/configuration`, `meta/global`, `crypto/keys`, and uploads
+of clients, prefs, tabs, bookmarks, addons and history. Three code changes were needed and all
+three came from the trace rather than from reading — the `fxa-credentials` grant, the batch-commit
+conflict, and the refresh-grant scope divergence — plus `tracing.py` and the README's
+*Pointing a browser at it* and *Debugging a client* sections.
+
+**Still to do, in the order that makes sense:**
+
+1. `GET /v1/account/attached_clients`, which Firefox polls throughout a session and which 404s
+   today. Not new protocol — the reference merges devices, sessions and authorized OAuth clients
+   into one flat list and every input already exists here. The sibling
+   `GET /v1/account/attached_oauth_clients` should land with it.
+2. `POST /v1/account/devices/notify`, called right after the clients collection is uploaded. Push
+   and Send Tab are deliberately out of scope, so the question is what a server without them
+   should *answer* — a 404 leaves Firefox retrying, and answering 200 to a notification that will
+   never be delivered is a lie the client cannot detect. Establish which upstream considers
+   correct before implementing either.
+3. Re-run the desktop pass on a **fresh profile** against a clean database. Everything above was
+   observed on a profile that had already failed several sign-ins, so the happy path has been
+   seen in recovery, not from zero.
+4. The Fenix half, which has not been started and which needs TLS first (see the secure-context
+   finding above). The four questions at the top of this phase remain open, and so does iOS.
 
 ### Phase 9 — harden `crypto/jose.py` ✅ done
 

@@ -26,6 +26,14 @@ signing_key = "signing-key.json"
 # a rotation still verify.
 # retired_key = "retired-key.json"
 
+[log]
+# "info" (the default), "debug", "warning" or "error". At "debug" every request
+# and response is written out with its body, which is how you find out why a
+# browser is unhappy — an access log line says a request was a 400, not which
+# field was wrong. Credentials are redacted to a prefix and a length, but the
+# output still describes someone's account: treat it as sensitive.
+# level = "debug"
+
 [ttl]
 # Seconds. access_token stays at or below 6h so tokens need no server-side store.
 access_token = 21600

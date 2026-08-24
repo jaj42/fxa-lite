@@ -83,6 +83,8 @@ def test_url_helper() -> None:
         ('public_url = "https://x.org"\n[listen]\nhostname = "x"', "unknown key(s) in [listen]"),
         ('public_url = "https://x.org"\n[ttl]\naccess_token = 0', "ttl.access_token must be"),
         ('public_url = "https://x.org"\ntokenserver_shared_secret = ""', "non-empty string"),
+        ('public_url = "https://x.org"\n[log]\nlevel = "verbose"', "log.level must be one of"),
+        ('public_url = "https://x.org"\n[log]\nlvl = "debug"', "unknown key(s) in [log]"),
         ('public_url = "https://x.org"\nlisten = 3', "[listen] must be a table"),
         ("public_url = [", "invalid TOML"),
     ],
@@ -90,6 +92,18 @@ def test_url_helper() -> None:
 def test_rejects_bad_config(tmp_path: Path, body: str, message: str) -> None:
     with pytest.raises(config.ConfigError, match=re.escape(message)):
         config.load(write(tmp_path, body))
+
+
+def test_log_level_defaults_to_info_and_traces_nothing(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, 'public_url = "https://x.org"'))
+    assert cfg.log.level == "info"
+    assert not cfg.log.traces_bodies
+
+
+def test_log_level_is_case_insensitive(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, 'public_url = "https://x.org"\n[log]\nlevel = "DEBUG"'))
+    assert cfg.log.level == "debug"
+    assert cfg.log.traces_bodies
 
 
 def test_missing_file(tmp_path: Path) -> None:

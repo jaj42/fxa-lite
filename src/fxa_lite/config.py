@@ -27,6 +27,11 @@ DEFAULT_CODE_TTL = 15 * 60
 # syncstorage-rs `token_duration` default.
 DEFAULT_TOKENSERVER_TTL = 3600
 
+#: What `[log] level` accepts. `debug` additionally traces request and response
+#: bodies — see `tracing.py` for what that does and does not write down.
+LOG_LEVELS = ("debug", "info", "warning", "error")
+DEFAULT_LOG_LEVEL = "info"
+
 
 class ConfigError(ValueError):
     """Raised for a malformed or incomplete config file."""
@@ -48,6 +53,15 @@ class PathsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class LogConfig:
+    level: str = DEFAULT_LOG_LEVEL
+
+    @property
+    def traces_bodies(self) -> bool:
+        return self.level == "debug"
+
+
+@dataclass(frozen=True, slots=True)
 class TtlConfig:
     access_token: int = DEFAULT_ACCESS_TOKEN_TTL
     authorization_code: int = DEFAULT_CODE_TTL
@@ -61,6 +75,7 @@ class Config:
     listen: ListenConfig = field(default_factory=ListenConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
     ttl: TtlConfig = field(default_factory=TtlConfig)
+    log: LogConfig = field(default_factory=LogConfig)
     #: HMAC secret shared between the tokenserver and sync storage tiers.
     tokenserver_shared_secret: str | None = None
     #: OAuth clients: the three browsers, plus anything `[[clients]]` adds.
@@ -94,7 +109,7 @@ def from_dict(
     base = Path(base) if base is not None else Path.cwd()
     _reject_unknown(
         data,
-        {"public_url", "tokenserver_shared_secret", "clients", "listen", "paths", "ttl"},
+        {"public_url", "tokenserver_shared_secret", "clients", "listen", "paths", "ttl", "log"},
         "",
     )
 
@@ -102,8 +117,10 @@ def from_dict(
     listen_raw = _section(data, "listen")
     paths_raw = _section(data, "paths")
     ttl_raw = _section(data, "ttl")
+    log_raw = _section(data, "log")
 
     _reject_unknown(listen_raw, {"host", "port"}, "listen")
+    _reject_unknown(log_raw, {"level"}, "log")
     _reject_unknown(paths_raw, {"database", "signing_key", "retired_key"}, "paths")
     _reject_unknown(ttl_raw, {"access_token", "authorization_code", "tokenserver_token"}, "ttl")
 
@@ -125,6 +142,8 @@ def from_dict(
         authorization_code=_seconds(ttl_raw, "authorization_code", DEFAULT_CODE_TTL),
         tokenserver_token=_seconds(ttl_raw, "tokenserver_token", DEFAULT_TOKENSERVER_TTL),
     )
+    log = LogConfig(level=_log_level(_get(log_raw, "level", str, "log", DEFAULT_LOG_LEVEL)))
+
     clients_raw = data.get("clients", [])
     if not isinstance(clients_raw, list) or not all(
         isinstance(entry, dict) for entry in clients_raw
@@ -144,10 +163,18 @@ def from_dict(
         listen=listen,
         paths=paths,
         ttl=ttl,
+        log=log,
         tokenserver_shared_secret=secret,
         clients=clients,
         source=source,
     )
+
+
+def _log_level(value: str) -> str:
+    level = value.lower()
+    if level not in LOG_LEVELS:
+        raise ConfigError(f"log.level must be one of {', '.join(LOG_LEVELS)}, got {value!r}")
+    return level
 
 
 def _public_url(value: str) -> str:
