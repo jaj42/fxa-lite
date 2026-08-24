@@ -73,8 +73,12 @@ pyproject.toml            # uv-managed; [project.scripts] fxa-lite = "fxa_lite.c
 fxa.example.toml          # annotated config template; copy to fxa.toml (gitignored)
 UPSTREAM.toml             # what "the reference" is: per checkout, the commit read and the
                           #   paths read from it — `resources/` itself is gitignored
+Dockerfile                # multi-stage uv build; runtime carries only /app/.venv
+docker-compose.yaml       # one service, one /data volume, published on loopback
+.dockerignore             # keeps `resources/` and the deployment secrets out of the image
 scripts/
   upstream-diff.sh        # what upstream has done to those paths since we last looked
+  docker-smoke.sh         # build the image, bootstrap it, assert it serves and leaks nothing
 src/fxa_lite/
   cli.py                  # `serve`, `account add|list|remove`, `keygen`
   config.py               # TOML -> dataclass; public_url, listen, jwks paths, token TTLs
@@ -572,7 +576,7 @@ As built:
 reference" *is*. Every "verified against the reference" claim above, and every constant in
 **Protocol constants**, is true of one commit and unverified against any other; if those
 checkouts are deleted the provenance goes with them. This is fifteen minutes of work and it
-blocks phase 11, so it goes first.
+blocks phase 12, so it goes first.
 
 - `UPSTREAM.toml` at the repo root — tracked, unlike `resources/`. Per checkout: the clone URL,
   the commit fxa-lite was read against, its date, and one line on what we took.
@@ -706,7 +710,7 @@ operated by one person with no ops team — and this codebase departs from the r
 deliberate places, each of which is a security decision no one but its author has reviewed.
 
 **1. The divergences, first, because they are the unreviewed part.** Collect every "deliberate
-divergence" from the phases above into one list — phase 11 documents the same list, so build it
+divergence" from the phases above into one list — phase 12 documents the same list, so build it
 here — and re-derive each argument rather than re-reading its original justification:
 
 - accounts-API HAWK MACs parsed and discarded (`auth/credentials.py`, matching
@@ -768,7 +772,7 @@ here — and re-derive each argument rather than re-reading its original justifi
 `identity.fxaccounts.allowHttp` never set outside a LAN test; `public_url` versus a rewriting
 proxy — phase 6 already made HAWK read `public_url` rather than `Host`, so confirm nothing else
 reads `Host`; the WebChannel origin allowlist; CSP and `Referrer-Policy` on every content route
-rather than only on the shell. This ends as a "Deploying this safely" page, which is a phase 11
+rather than only on the shell. This ends as a "Deploying this safely" page, which is a phase 12
 deliverable.
 
 Run `/security-review` over the branch as one input, not as the audit: it reviews a diff, and the
@@ -779,14 +783,130 @@ written into the docs rather than into a file nobody opens. Every fix lands with
 everything else in this project has. Then re-run the suite **and** phase 8 against real Firefox —
 the audit will touch auth-path code, and that path has exactly one integration test that matters.
 
-### Phase 11 — documentation and CI
+### Phase 11 — Docker
+
+`uvx fxa-lite --config fxa.toml` is the intended outcome, but the machine a household actually
+runs this on is a NAS or a small always-on box that already hosts three other things, and there
+the unit of deployment is a container, not a `uv tool install` into somebody's home directory.
+The image should make the same promise as the CLI — one process, one file of state — and it
+should be boring: no entrypoint script that generates secrets, no supervisor, no bundled proxy.
+
+**Build.** Multi-stage, following the astral uv guidance: a builder on
+`ghcr.io/astral-sh/uv:python3.13-trixie-slim` (or `python:3.13-slim-trixie` with the uv binary
+copied in from a pinned distroless tag), and a runtime on plain `python:3.13-slim-trixie` that
+receives `/app/.venv` and nothing else.
+
+- `uv sync --locked --no-dev --no-editable`, split into two layers — dependencies from a bind
+  mount of `pyproject.toml` + `uv.lock` first, the project after `COPY . /app` — so a source edit
+  does not re-resolve `cryptography`. `--no-editable` is what makes the source-free runtime stage
+  possible; `--no-dev` keeps `pytest`, `ruff` and `ty` out of a deployed image.
+- `ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=0`, plus a
+  `--mount=type=cache,target=/root/.cache/uv`.
+- Pin, in the spirit of `UPSTREAM.toml`: the uv image by `@sha256:` digest, not by `:latest`, and
+  the base image likewise. `gh attestation verify --owner astral-sh oci://ghcr.io/astral-sh/uv:<v>`
+  is one command and worth running once when the pin is chosen; record it beside the pin.
+- `--locked` is also a free CI check: if `uv.lock` ever drifts from `pyproject.toml`, the image
+  build fails rather than quietly resolving something else.
+
+**`.dockerignore` comes first, before any of that, and it is the step with teeth.** `resources/`
+is the two upstream checkouts and is 844 MB today — it is gitignored, so it is invisible to
+review, and a missing `.dockerignore` sends every byte of it to the daemon as build context on
+every build. The same file is what keeps deployment secrets out of an image that may be pushed to
+a registry: `fxa.toml`, `*.sqlite*`, `signing-key.json`, `retired-key.json`, `.venv/`, `.git/`,
+and the caches. Mirror `.gitignore`'s "local deployment state" block and add a test or a build
+assertion that the built image contains none of those paths — "I checked once" is exactly the
+kind of claim phase 12's CI exists to stop the project from making.
+
+**State is one volume, and the config file already says so.** `config.py` resolves relative paths
+against the directory holding the config, which was written so a config plus its database and
+signing key move as a unit; a container is that unit. Mount one volume at `/data`, put `fxa.toml`
+in it beside `fxa.sqlite` and `signing-key.json`, and set `FXA_LITE_CONFIG=/data/fxa.toml` — the
+env var `cli.py:112` already honours. No new configuration surface, no flags in `CMD`, and
+nothing in the image is writable that needs to be.
+
+**Two container-shaped traps in the existing defaults:**
+
+- `[listen] host` defaults to `127.0.0.1`, which inside a network namespace means unreachable —
+  including by the healthcheck. The image sets `0.0.0.0` (via `CMD ["serve", "--host", "0.0.0.0"]`,
+  which `cmd_serve` already accepts) and compose publishes `127.0.0.1:9000:9000` so the loopback
+  binding moves to the host, where it belongs, in front of whatever proxy terminates TLS.
+- `public_url` must be the external `https://` origin, never the container's. Phase 6 already made
+  HAWK read `public_url` rather than `Host`, so a rewriting proxy is fine — this is a documentation
+  point, but it is the first thing that goes wrong behind a reverse proxy and it deserves a line in
+  `fxa.example.toml` rather than only in the docs.
+
+**Bootstrap is interactive and stays that way.** `keygen` and `account add` are administrative acts
+on the machine holding the database, and `account add` prompts through `getpass`:
+
+```sh
+docker compose run --rm fxa-lite keygen
+docker compose run --rm -it fxa-lite account add you@example.com
+docker compose up -d
+```
+
+which wants `ENTRYPOINT ["/app/.venv/bin/fxa-lite"]` and `CMD ["serve", "--host", "0.0.0.0"]` so
+every subcommand is reachable without `--entrypoint`. **Do not** generate a signing key from an
+entrypoint script when one is missing: a container that silently mints a new key after a volume
+fails to mount looks like it recovered while having invalidated every outstanding token, and
+`cmd_serve` already exits 1 with the right instruction. The failure that is loud on a laptop must
+stay loud in a restart loop.
+
+**Runtime user and file modes.** Run as a non-root uid — `USER` in the Dockerfile plus `/data`
+created and chowned in the image, which is what makes a *named* volume inherit the right
+ownership on first use; a *bind* mount does not, and needs a host-side `chown` that the deployment
+page has to spell out with the uid in it. `keygen` writes the key 0600, which phase 10 confirms
+`serve` never widens — that guarantee only holds if the file is owned by the user the container
+runs as, so the smoke test should assert both the mode and the owner after a containerised
+`keygen`.
+
+**Compose, one service, hardened by default.** `read_only: true` with a `tmpfs: /tmp` (all state
+is `/data`, so the root filesystem has no reason to be writable), `cap_drop: [ALL]`,
+`security_opt: [no-new-privileges:true]`, `restart: unless-stopped`, an explicit `user:`, and the
+loopback port publication above. No nginx, no Caddy, no certificate machinery in this file: TLS is
+the host's job and bundling a proxy would double the surface of a project whose entire argument is
+that the reference deployment has too many moving parts. A commented-out Caddy service in the
+compose file is the most that is warranted, and even that is arguable.
+
+`HEALTHCHECK` targets `/__heartbeat__`, which pings the database rather than merely answering —
+`/__lbheartbeat__` cannot tell a broken volume from a healthy one. There is no `curl` in a slim
+image and adding one for this is silly; use `python -c` with `urllib.request` against
+`127.0.0.1:<port>`.
+
+**Two operational facts that belong in the compose file's comments, not only in the docs:**
+SQLite over NFS or SMB has broken locking, so `/data` must be a local filesystem or a named
+volume backed by one — the "household NAS" that motivates this phase is also the machine most
+likely to get this wrong; and backup is `docker compose stop` (or a `sqlite3 .backup`) over one
+directory, which is the whole disaster-recovery story and reads as a selling point rather than a
+caveat.
+
+**Multi-arch, because that NAS is probably arm64.** `docker buildx build --platform
+linux/amd64,linux/arm64`. `cryptography` publishes manylinux wheels for both, so the build stays a
+download; the failure mode if a wheel is ever missing is uv falling back to an sdist that wants a
+Rust toolchain and OpenSSL headers, turning a fifteen-second build into a broken one. If that
+happens the fix is a pin, not a compiler in the builder stage. Glibc over musl for the same
+reason — alpine would mean musl wheels or source builds for no benefit here.
+
+**Development is deliberately not containerised.** `uv run fxa-lite serve --reload` is faster than
+any bind-mount-and-watch arrangement, and `tests/js/*.mjs` need `node`, which has no business in a
+deployment image. `docker compose watch` is documented in the uv guide and is the right tool for a
+different project; note the decision so the question is not reopened.
+
+**Deliverables:** `Dockerfile`, `docker-compose.yaml`, `.dockerignore`, a `scripts/docker-smoke.sh`
+that builds the image and drives keygen → `account add --password` → `up` → assert the discovery
+document and `/__heartbeat__` → assert the secrets are absent from the image, and the
+`fxa.example.toml` comment on `public_url` behind a proxy. Phase 12's CI builds the image on PR
+(build only, no push) and phase 12's deployment page is where this stops being a list of flags and
+becomes instructions.
+
+### Phase 12 — documentation and CI
 
 Sphinx under `docs/`, published to GitHub Pages by `.github/workflows/`. There is no CI at all
 today: "`ruff check` and `ty check` clean" at the end of every phase is a claim a human made six
 times. So the first workflow to write is not the docs one.
 
 **CI** (`.github/workflows/ci.yml`) — beyond what was asked; drop it if you want the docs alone.
-`uv sync`, then `pytest`, `ruff check`, `ty check`, on push and PR. The catch: the node-driven
+`uv sync`, then `pytest`, `ruff check`, `ty check`, plus a build-only `docker buildx build` of
+phase 11's image, on push and PR. The catch: the node-driven
 content tests (`tests/js/*.mjs`) *skip* when `node` is absent, so the runner needs
 `actions/setup-node` or they quietly do not run — and they are the only coverage of the
 browser-side crypto, which is the coverage this project can least afford to lose silently. Assert
@@ -799,7 +919,11 @@ dependency group — never a runtime dependency):
   with a MyST `include` rather than copying, or the two drift within a month. The page around them
   is what the README deliberately is not: `fxa.example.toml` walked key by key, `keygen` and what
   a rotation costs, reverse proxy and TLS, the `about:config` prefs from phase 8, and backup —
-  one SQLite file plus one key file, and what happens when you lose either.
+  one SQLite file plus one key file, and what happens when you lose either. Both deployment shapes
+  belong here: `uvx` on the host, and phase 11's container with its `/data` volume, its bind-mount
+  ownership caveat and the `public_url`-behind-a-proxy rule. This is also where phase 10's
+  operator-dependent findings land as instructions — TLS termination and the rate limit in front
+  of the scrypt call are compose-level answers as much as they are code-level ones.
 - *Architecture.* The prefix table above, the six tiers and why they are one process, the schema
   and each table's lifetime, and the three error envelopes together with the reason there are
   three. A reader's first instinct is that this is sloppiness; the doc should say otherwise before
@@ -819,7 +943,7 @@ dependency group — never a runtime dependency):
   uniform `# DIVERGENCE:` comment and generate the table, or author the table and add a test
   asserting markers and rows agree. There are zero such markers today; the information lives in
   prose in this plan and in comments at the routes, which is exactly why phase 10 has to collect
-  it before phase 11 can publish it.
+  it before phase 12 can publish it.
   One caution, since this chapter is public: "here is where our auth server is deliberately unlike
   the reference" is a useful document for somebody attacking a running instance. Write the
   reasoning, not an exploitation path, and put the operator-dependent phase 10 items — rate
@@ -856,7 +980,7 @@ do both by half.
   ask itself: has upstream changed one of the files a constant was read from? Run it before
   bumping a pin, and bump the pin only with the change or the note that answers its diff.
 - Manual: Phase 8, then `about:sync-log` and the Sync panel in `about:preferences#sync`.
-- CI runs the first four of these from phase 11 on; until then they are run by hand, and
+- CI runs the first four of these from phase 12 on; until then they are run by hand, and
   `tests/js/*.mjs` silently skip wherever `node` is missing.
 
 ## Deliberately out of scope
