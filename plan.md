@@ -429,11 +429,59 @@ As built:
   password through to the oldsync key coming back out of `keys_jwe`.
 - 428 tests. `ruff check` and `ty check` clean.
 
-### Phase 5 — tokenserver
+### Phase 5 — tokenserver ✅ done
 `GET /token/1.0/sync/1.5`, `Authorization: Bearer <access token>`, `X-KeyID: <kid>`. Verify the
 JWT locally against our own JWKS, require the `oldsync` scope, derive `fxa_kid` from the client
 state, allocate/lookup the numeric `uid`, mint the tokenlib token. `node` is our own
 `/storage` URL. Handle client-state change (keys rotated) by retiring the old sync uid.
+
+As built:
+
+- `tokenserver/__init__.py` — one route. Verification collapses to a local signature check
+  (upstream calls FxA's `/v1/verify` or caches its JWKS), and node allocation collapses to a
+  constant, because there is one node. What does not collapse is `TokenserverRequest::validate`
+  and `update_user`: the rules about `generation`, `keysChangedAt` and the client state are ported
+  line for line, including `opt_cmp!`'s "false unless both operands are present" — the asymmetry
+  is the point, since a client that has never reported a `generation` must not be locked out by
+  one while a client that has reported one may not stop.
+- One divergence, documented at the route: fxa-lite **checks `aud`**. Upstream turns that check off
+  with a comment saying the ecosystem does not request the right audience; ours mints that audience
+  itself in `grant.py`, so the check holds and it is what stops a token issued for another relier
+  from being spent here.
+- `X-KeyID`'s client state is matched against a base64url regex before decoding.
+  `base64.urlsafe_b64decode` *discards* characters outside the alphabet instead of raising, so
+  `1234-!!!!` decoded to an empty client state and was accepted — a test caught it. Rust's
+  `URL_SAFE_NO_PAD` rejects both stray characters and padding, and so does this.
+- `tokenserver/errors.py` — a second error envelope, `{status, errors:[{location,name,description}]}`.
+  It is not the accounts API's and must not be tidied into it: Firefox has a separate parser for
+  each, and `status` (`invalid-client-state`, `invalid-generation`, `invalid-keysChangedAt`) is
+  what tells the client to re-authenticate rather than retry a dead token forever. `app.py` gained
+  a handler for it, and routes a 404 below `/token` there too.
+- `tokenserver/tokenlib.py` — minting only; the storage tier's reading half lands in phase 6. Three
+  encodings are load-bearing and each is a plausible mistake: URL-safe base64 **with** padding
+  (unlike every other base64url here), an HKDF salt that is the ASCII of the hex salt string, and a
+  derive info ending in the token's own base64 text, which binds the key to the exact id.
+- The shared secret is **derived from the OAuth signing key** when `tokenserver_shared_secret` is
+  unset. Upstream must configure it because the two tiers are separate deployments that have to be
+  told the same string; here they are one process, so there is nobody to agree with, and a secret
+  that silently defaults to empty is how Sync fails without a message. Rotating either key costs
+  clients one extra token fetch.
+- `hashed_fxa_uid` / `hashed_device_id` are keyed with that same secret rather than upstream's
+  dedicated `fxa_metrics_hash_secret`: there is no metrics pipeline, but the values still go on the
+  wire and into the token, so they still have to be one-way. `hash_device_id`'s upstream parameter
+  is named `fxa_uid` and is passed the *already hashed* uid; reproduced as-is.
+- `sync_users` is schema v2, and `db.migrate()` now applies ordered steps rather than creating
+  everything at once — a phase 4 database upgrades in place. The uid column is `AUTOINCREMENT`
+  because SQLite otherwise reuses the largest rowid after a delete, and that uid *is* the storage
+  directory. Unlike upstream, whose tokenserver is a separate database keyed on
+  `<uid>@<email domain>`, the foreign key here is real: deleting an account takes its Sync data.
+- `node_type` answers `"sqlite"`. Upstream's enum is mysql/spanner/postgres and fxa-lite is none of
+  them; Firefox reads `id`, `key`, `uid` and `api_endpoint` and ignores the rest.
+- Verified: 485 tests. `tests/conformance/client.py` grew tokenlib's *reader* — the half
+  `syncstorage-rs` implements, written out from `token/native.rs` — so the token is checked by an
+  independent implementation rather than by fxa-lite agreeing with itself, and phase 6's parser has
+  a specification to match. Each consistency rule has its own test with the credential hand-built,
+  since a real client cannot produce most of those situations. `ruff check` and `ty check` clean.
 
 ### Phase 6 — Sync 1.5 storage
 Real HAWK verification this time (id = tokenlib token, key = derived secret, algorithm sha256,

@@ -25,12 +25,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-#: Bumped whenever `SCHEMA` changes; stored in SQLite's `user_version`.
-SCHEMA_VERSION = 1
-
 MEMORY = Path(":memory:")
 
-SCHEMA = """
+SCHEMA_V1 = """
 CREATE TABLE accounts (
     uid                TEXT    PRIMARY KEY,
     email              TEXT    NOT NULL,
@@ -130,6 +127,46 @@ CREATE TABLE refresh_tokens (
 CREATE INDEX refresh_tokens_uid ON refresh_tokens(uid);
 """
 
+SCHEMA_V2 = """
+-- Phase 5: the Sync tokenserver's user table.
+--
+-- Sync identifies an account by a small integer, not by the FxA uid, and that
+-- integer is the directory its storage lives in.  A client-state change (the
+-- user's keys rotated) does not update the row: it *replaces* it, so the new
+-- key material gets a new uid and cannot read records encrypted under the old
+-- one.  The old row stays behind, both as the record of a client state that
+-- must never be accepted again and as the handle for deleting its storage.
+--
+-- AUTOINCREMENT, not a bare rowid: SQLite reuses the largest rowid after a
+-- delete, and a recycled uid would hand a new user the previous one's
+-- collections.
+--
+-- Upstream keys this table on `<fxa_uid>@<email domain>` because its
+-- tokenserver is a separate deployment that has never seen the accounts table.
+-- Ours is the same file, so the foreign key is real and deleting an account
+-- takes its Sync data with it.
+CREATE TABLE sync_users (
+    uid             INTEGER PRIMARY KEY AUTOINCREMENT,
+    fxa_uid         TEXT    NOT NULL REFERENCES accounts(uid) ON DELETE CASCADE,
+    -- sha256(kB)[:16] as hex: the fingerprint of the key the client is using.
+    client_state    TEXT    NOT NULL,
+    generation      INTEGER NOT NULL,
+    keys_changed_at INTEGER,
+    created_at      INTEGER NOT NULL,
+    -- Set when a newer row supersedes this one; NULL for the row in use.
+    replaced_at     INTEGER
+) STRICT;
+
+CREATE INDEX sync_users_fxa_uid ON sync_users(fxa_uid);
+"""
+
+#: Ordered DDL steps. A database stamped `user_version = N` has had the first
+#: `N` applied, so an existing file is upgraded by running the rest.
+MIGRATIONS = (SCHEMA_V1, SCHEMA_V2)
+
+#: Stored in SQLite's `user_version`.
+SCHEMA_VERSION = len(MIGRATIONS)
+
 
 class DatabaseError(RuntimeError):
     """Raised for a database that cannot be opened or is from a future version."""
@@ -211,6 +248,25 @@ class RefreshToken:
     scope: str
     created_at: int
     last_used_at: int
+
+
+@dataclass(frozen=True, slots=True)
+class SyncUser:
+    """One (account, key generation) pair, and the Sync uid it owns.
+
+    `keys_changed_at` is nullable rather than 0-defaulted because the
+    tokenserver protocol distinguishes "this client has never reported one"
+    from "it reported zero", and rejects a client that stops reporting one it
+    has already sent.
+    """
+
+    uid: int
+    fxa_uid: str
+    client_state: str
+    generation: int
+    keys_changed_at: int | None
+    created_at: int
+    replaced_at: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,14 +371,13 @@ class Database:
                 f"{self.path} was written by a newer fxa-lite "
                 f"(schema {version}, we speak {SCHEMA_VERSION})"
             )
-        if version == SCHEMA_VERSION:
-            return
         # `executescript` commits whatever transaction is open before it runs, so
         # the BEGIN/COMMIT have to live inside the script for the DDL and the
         # version stamp to land together. PRAGMA takes no parameter binding.
-        self.connection.executescript(
-            f"BEGIN IMMEDIATE;\n{SCHEMA}\nPRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;"
-        )
+        for step, ddl in enumerate(MIGRATIONS[version:], start=version + 1):
+            self.connection.executescript(
+                f"BEGIN IMMEDIATE;\n{ddl}\nPRAGMA user_version = {step};\nCOMMIT;"
+            )
 
     # -- accounts -------------------------------------------------------------
 
@@ -525,6 +580,77 @@ class Database:
             "DELETE FROM refresh_tokens WHERE token_id = ?", (token_id,)
         )
         return cursor.rowcount > 0
+
+    # -- sync users -----------------------------------------------------------
+
+    def sync_users(self, fxa_uid: str) -> list[SyncUser]:
+        """Every Sync uid this account has held, most recent first.
+
+        The ordering is the tokenserver's definition of "current": greatest
+        generation, then most recently created. Everything after the first
+        element is history — a client state that has been retired, and storage
+        waiting to be reclaimed.
+        """
+        rows = self.connection.execute(
+            """
+            SELECT * FROM sync_users WHERE fxa_uid = ?
+            ORDER BY generation DESC, created_at DESC, uid DESC
+            """,
+            (fxa_uid,),
+        )
+        return [SyncUser(**dict(row)) for row in rows]
+
+    def create_sync_user(
+        self,
+        *,
+        fxa_uid: str,
+        client_state: str,
+        generation: int,
+        keys_changed_at: int | None,
+        created_at: int,
+    ) -> SyncUser:
+        """Allocate the next Sync uid. SQLite assigns it; we read it back."""
+        cursor = self.connection.execute(
+            """
+            INSERT INTO sync_users (
+                fxa_uid, client_state, generation, keys_changed_at, created_at, replaced_at
+            ) VALUES (?, ?, ?, ?, ?, NULL)
+            """,
+            (fxa_uid, client_state, generation, keys_changed_at, created_at),
+        )
+        return SyncUser(
+            uid=int(cursor.lastrowid or 0),
+            fxa_uid=fxa_uid,
+            client_state=client_state,
+            generation=generation,
+            keys_changed_at=keys_changed_at,
+            created_at=created_at,
+            replaced_at=None,
+        )
+
+    def update_sync_user(self, uid: int, *, generation: int, keys_changed_at: int | None) -> None:
+        """Move a row forward in time. Both values are monotonic by the time we get here."""
+        self.connection.execute(
+            "UPDATE sync_users SET generation = ?, keys_changed_at = ? WHERE uid = ?",
+            (generation, keys_changed_at, uid),
+        )
+
+    def replace_sync_user(self, uid: int, replaced_at: int) -> None:
+        self.connection.execute(
+            "UPDATE sync_users SET replaced_at = ? WHERE uid = ? AND replaced_at IS NULL",
+            (replaced_at, uid),
+        )
+
+    def replace_other_sync_users(self, fxa_uid: str, *, keep: int, replaced_at: int) -> int:
+        """Retire every row for this account except `keep`."""
+        cursor = self.connection.execute(
+            """
+            UPDATE sync_users SET replaced_at = ?
+            WHERE fxa_uid = ? AND uid != ? AND replaced_at IS NULL
+            """,
+            (replaced_at, fxa_uid, keep),
+        )
+        return cursor.rowcount
 
     # -- devices --------------------------------------------------------------
 

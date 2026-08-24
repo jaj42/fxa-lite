@@ -11,6 +11,11 @@ Phase 3 adds the relier half of the OAuth flow, ported from
 PKCE, scoped-key derivation, and the compact ECDH-ES JWE a client builds to
 carry its scoped keys home.
 
+Phase 5 adds the Sync tokenserver's client and, more usefully, tokenlib's
+*reader* — the half `syncstorage-rs` implements rather than the half fxa-lite
+does.  Written out from `token/native.rs` and `web/auth.rs`, it is what proves
+the credential fxa-lite mints is one a real storage node would accept.
+
 The HKDF, PBKDF2, XOR, concat-KDF and JWE below are therefore *intentional*
 duplication.  Only `cryptography`'s primitives are shared with the server, and
 only where the stdlib has no equivalent.
@@ -623,3 +628,96 @@ class SyncGrant:
 
 def _with_keys(path: str, keys: bool) -> str:
     return f"{path}?keys=true" if keys else path
+
+
+# --------------------------------------------------------------------------
+# The Sync tokenserver, and tokenlib from the storage tier's side.
+# --------------------------------------------------------------------------
+
+TOKENLIB_SIGNING_INFO = b"services.mozilla.com/tokenlib/v1/signing"
+TOKENLIB_DERIVE_INFO = b"services.mozilla.com/tokenlib/v1/derive/"
+
+
+class TokenserverError(Exception):
+    """The tokenserver's envelope, which is not the accounts API's.
+
+    `status` is the field with meaning — `invalid-client-state` and friends —
+    and there is no `errno` anywhere in it.
+    """
+
+    def __init__(self, status_code: int, body: dict[str, Any]) -> None:
+        errors = body.get("errors") or [{}]
+        super().__init__(f"{status_code} {body.get('status')}: {errors[0].get('description')}")
+        self.status_code = status_code
+        self.body = body
+        self.status = body.get("status")
+        self.description = errors[0].get("description")
+        self.name = errors[0].get("name")
+        self.location = errors[0].get("location")
+
+
+def parse_sync_token(token: str, secret: str) -> dict[str, Any]:
+    """Verify a tokenlib token and return its claims — `HawkPayload::extract_and_validate`.
+
+    Note the padded URL-safe base64: tokenlib is the one place in this protocol
+    that does not strip `=`.
+    """
+    raw = base64.urlsafe_b64decode(token)
+    if len(raw) <= 32:
+        raise ValueError("tokenlib token is too short to carry a signature")
+    payload, signature = raw[:-32], raw[-32:]
+    key = hkdf(secret.encode(), TOKENLIB_SIGNING_INFO, 32)
+    if not hmac.compare_digest(hmac.new(key, payload, hashlib.sha256).digest(), signature):
+        raise ValueError("bad tokenlib signature")
+    return json.loads(payload)
+
+
+def derive_sync_key(token: str, salt: str, secret: str) -> str:
+    """The HAWK key storage recomputes from the token it is shown."""
+    derived = hkdf(
+        secret.encode(), TOKENLIB_DERIVE_INFO + token.encode("ascii"), 32, salt=salt.encode("ascii")
+    )
+    return base64.urlsafe_b64encode(derived).decode("ascii")
+
+
+class TokenserverClient:
+    """`GET /token/1.0/sync/1.5` — the one call the Sync tokenserver answers."""
+
+    def __init__(self, http: httpx.AsyncClient, prefix: str = "/token") -> None:
+        self.http = http
+        self.prefix = prefix
+
+    async def token(
+        self,
+        access_token: str,
+        key_id: str,
+        *,
+        client_state: str | None = None,
+        duration: int | None = None,
+        path: str = "/1.0/sync/1.5",
+    ) -> dict[str, Any]:
+        headers = {"Authorization": f"Bearer {access_token}", "X-KeyID": key_id}
+        if client_state is not None:
+            headers["X-Client-State"] = client_state
+        params = {} if duration is None else {"duration": str(duration)}
+        response = await self.http.get(
+            f"{self.prefix}{path}", headers=headers, params=params
+        )
+        try:
+            body = response.json()
+        except ValueError as exc:  # pragma: no cover - a non-JSON body is a bug
+            raise TokenserverError(response.status_code, {"status": response.text}) from exc
+        if response.status_code >= 400:
+            raise TokenserverError(response.status_code, body)
+        return body
+
+
+def sync_key_id(scoped_key: dict[str, Any]) -> str:
+    """`X-KeyID` is the oldsync scoped key's own `kid`, unchanged.
+
+    Firefox does not build this header: it hands over the `kid` it already has
+    from `keys_jwe`, which is why the tokenserver can compare client states at
+    all — both sides are naming `sha256(kB)[:16]`.
+    """
+    return str(scoped_key["kid"])
+

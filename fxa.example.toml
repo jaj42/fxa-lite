@@ -7,8 +7,12 @@
 # storage — is served below it.
 public_url = "http://localhost:9000"
 
-# HMAC secret shared by the tokenserver and sync storage tiers. Any long random
-# string; changing it invalidates outstanding sync tokens (clients re-fetch).
+# HMAC secret shared by the tokenserver and sync storage tiers. Upstream this
+# must be set, because the two are separate deployments that have to be told the
+# same string; here they are one process, so leaving it out is the normal case —
+# one is derived from the signing key instead. Set it only if you mean to pin it
+# independently of that key. Changing either invalidates outstanding sync tokens,
+# which costs clients one extra request.
 # tokenserver_shared_secret = "change-me"
 
 [listen]

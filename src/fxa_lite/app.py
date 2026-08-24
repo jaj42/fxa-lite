@@ -2,8 +2,8 @@
 
 One app, one origin.  The accounts and OAuth APIs mount at `/v1` — the prefix
 the reference auth server uses, and the one it serves OAuth from too — the
-profile server at `/profile/v1`, the sign-in page and its assets at the root,
-and the discovery documents alongside them.
+profile server at `/profile/v1`, the Sync tokenserver at `/token`, and the
+sign-in page, its assets and the discovery documents at the root.
 `/.well-known/fxa-client-configuration` tells Firefox where each of those is,
 so the layout is ours to choose; see `wellknown.py`.
 
@@ -14,7 +14,8 @@ The error handlers matter as much as the routes.  A client reads `errno`, not
 the HTTP status, so an unhandled exception that escapes as FastAPI's default
 `{"detail": ...}` is not "a 500 with a different body" — it is a response the
 client cannot interpret at all.  Everything is funnelled through
-`errors.FxaError`.
+`errors.FxaError` — except the tokenserver, which has always spoken a different
+envelope and gets its own handler.
 """
 
 from __future__ import annotations
@@ -28,13 +29,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 
-from . import __version__, auth, content, errors, profile, wellknown
+from . import __version__, auth, content, errors, profile, tokenserver, wellknown
 from .config import Config
 from .db import Database, open_database
 from .oauth import routes as oauth_routes
 from .oauth.clients import Registry
 from .oauth.keys import SigningKeys
 from .oauth.keys import load as load_signing_keys
+from .tokenserver import tokenlib
 
 #: The prefix the reference auth server serves its API from. The OAuth routes
 #: share it: upstream they are one process behind one prefix, and Firefox's
@@ -42,6 +44,8 @@ from .oauth.keys import load as load_signing_keys
 API_PREFIX = "/v1"
 #: `fxa-profile-server`'s own prefix, below a mount of our choosing.
 PROFILE_PREFIX = "/profile/v1"
+#: What `sync_tokenserver_base_url` points at; Firefox appends `/1.0/sync/1.5`.
+TOKENSERVER_PREFIX = "/token"
 
 
 def create_app(
@@ -78,12 +82,19 @@ def create_app(
     app.state.config = config
     app.state.signing_keys = keys
     app.state.clients = Registry(config.clients)
+    # The tokenserver and the storage tier share this; here they are the same
+    # process, so it falls out of the signing key unless configured. See
+    # `tokenlib.resolve_shared_secret`.
+    app.state.tokenserver_secret = tokenlib.resolve_shared_secret(
+        config.tokenserver_shared_secret, keys.private
+    )
     if db is not None:
         app.state.db = db
 
     app.include_router(auth.router(), prefix=API_PREFIX)
     app.include_router(oauth_routes.router, prefix=API_PREFIX)
     app.include_router(profile.router, prefix=PROFILE_PREFIX)
+    app.include_router(tokenserver.router, prefix=TOKENSERVER_PREFIX)
     app.include_router(wellknown.router)
     app.include_router(content.router)
     _add_defaults(app, config)
@@ -126,6 +137,13 @@ def _add_defaults(app: FastAPI, config: Config) -> None:
 
 
 def _add_error_handlers(app: FastAPI) -> None:
+    @app.exception_handler(tokenserver.errors.TokenserverError)
+    async def tokenserver_error_handler(
+        request: Request, exc: tokenserver.errors.TokenserverError
+    ) -> JSONResponse:
+        """The tokenserver's envelope is not the accounts API's — see its `errors`."""
+        return JSONResponse(exc.payload, status_code=exc.http_status)
+
     @app.exception_handler(errors.FxaError)
     async def fxa_error_handler(request: Request, exc: errors.FxaError) -> JSONResponse:
         return JSONResponse(exc.payload, status_code=exc.code, headers=exc.headers)
@@ -138,6 +156,15 @@ def _add_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(HTTPException)
     async def http_error_handler(request: Request, exc: HTTPException) -> JSONResponse:
+        if request.url.path.startswith(f"{TOKENSERVER_PREFIX}/"):
+            # A 404 below `/token` is still a tokenserver response. Firefox has
+            # a separate parser for each shape and reads `status` out of this
+            # one; handing it the accounts envelope here would look like a
+            # success with no fields.
+            return await tokenserver_error_handler(
+                request,
+                tokenserver.errors.unsupported("Unsupported application", "application"),
+            )
         return await fxa_error_handler(request, _from_http_exception(exc))
 
     @app.exception_handler(Exception)

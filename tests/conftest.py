@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator, Iterator
 import httpx
 import pytest
 
-from conformance.client import AuthClient
+from conformance.client import AuthClient, TokenserverClient
 from fxa_lite.app import create_app
 from fxa_lite.config import Config, from_dict
 from fxa_lite.crypto import jose
@@ -82,3 +82,19 @@ def client(http: httpx.AsyncClient, scheme: str) -> AuthClient:
 def bearer_client(http: httpx.AsyncClient) -> AuthClient:
     """For tests where the scheme is irrelevant and running twice buys nothing."""
     return AuthClient(http, scheme="bearer")
+
+
+@pytest.fixture
+def tokenserver(http: httpx.AsyncClient) -> TokenserverClient:
+    return TokenserverClient(http)
+
+
+@pytest.fixture
+def tokenserver_secret(app) -> str:
+    """What the storage tier would have been told out of band.
+
+    Reading it off the app is not a shortcut around the protocol: in phase 6
+    the reader of these tokens is this same process, and every test that uses
+    it re-derives the token from scratch rather than asking fxa-lite anything.
+    """
+    return app.state.tokenserver_secret
