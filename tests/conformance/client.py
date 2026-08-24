@@ -494,6 +494,21 @@ class AuthClient:
     async def oauth_token(self, **payload: Any) -> Any:
         return await self.request("POST", "/oauth/token", payload)
 
+    async def oauth_token_from_session(self, session_token: str, **payload: Any) -> Any:
+        """`grant_type=fxa-credentials`: the session token *is* the credential.
+
+        Upstream authenticates this with either scheme the auth tier accepts,
+        so it goes through `authed` like any session-token route rather than
+        carrying an assertion in the body.
+        """
+        return await self.authed(
+            "POST",
+            "/oauth/token",
+            session_token,
+            "sessionToken",
+            {"grant_type": "fxa-credentials", **payload},
+        )
+
     async def scoped_key_data(self, session_token: str, client_id: str, scope: str) -> Any:
         return await self.authed(
             "POST",

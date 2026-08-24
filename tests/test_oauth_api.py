@@ -369,9 +369,108 @@ async def test_expired_codes_are_refused(bearer_client: AuthClient, db, config) 
 async def test_unknown_grant_type_is_refused(bearer_client: AuthClient) -> None:
     with pytest.raises(ClientError) as caught:
         await bearer_client.oauth_token(
-            client_id=FIREFOX_DESKTOP_CLIENT_ID, grant_type="fxa-credentials"
+            client_id=FIREFOX_DESKTOP_CLIENT_ID,
+            grant_type="urn:ietf:params:oauth:grant-type:token-exchange",
         )
     assert caught.value.errno == 121
+
+
+# -- the direct grant --------------------------------------------------------
+#
+# Firefox Desktop destroys the refresh token it is issued by the code flow and
+# mints every later access token straight from its session token, so this grant
+# is the one Sync actually runs on. See phase 8 in plan.md.
+
+
+async def test_direct_grant_mints_an_access_token_from_a_session(
+    grant, bearer_client: AuthClient
+) -> None:
+    minted = await bearer_client.oauth_token_from_session(
+        grant.session_token, client_id=FIREFOX_DESKTOP_CLIENT_ID, scope=OLDSYNC_SCOPE
+    )
+    assert minted["scope"] == OLDSYNC_SCOPE
+    assert minted["token_type"] == "bearer"
+    # `access_type` defaulted to online, so there is nothing long-lived here.
+    assert "refresh_token" not in minted
+
+    _, claims = decode_jwt(minted["access_token"])
+    assert claims["sub"] == grant.account["uid"]
+    assert claims["scope"] == OLDSYNC_SCOPE
+
+
+async def test_direct_grant_for_sync_is_audienced_to_the_tokenserver(
+    grant, bearer_client: AuthClient, config
+) -> None:
+    """The claim Sync's whole authorization chain hangs off.
+
+    A token minted this way has to be interchangeable with one from the code
+    flow, and `aud` is where that would silently break: a token audienced to
+    the client id is refused by the tokenserver.
+    """
+    minted = await bearer_client.oauth_token_from_session(
+        grant.session_token, client_id=FIREFOX_DESKTOP_CLIENT_ID, scope=OLDSYNC_SCOPE
+    )
+    _, claims = decode_jwt(minted["access_token"])
+    assert claims["aud"] == f"{config.public_url}/token"
+
+
+async def test_direct_grant_requires_a_session_token(bearer_client: AuthClient) -> None:
+    await _account(bearer_client)
+    with pytest.raises(ClientError) as caught:
+        await bearer_client.oauth_token(
+            client_id=FIREFOX_DESKTOP_CLIENT_ID,
+            grant_type="fxa-credentials",
+            scope="profile",
+        )
+    assert caught.value.code == 401
+    assert caught.value.errno == 110
+
+
+async def test_direct_grant_requires_a_scope(grant, bearer_client: AuthClient) -> None:
+    with pytest.raises(ClientError) as caught:
+        await bearer_client.oauth_token_from_session(
+            grant.session_token, client_id=FIREFOX_DESKTOP_CLIENT_ID
+        )
+    assert caught.value.errno == 109
+
+
+async def test_direct_grant_offline_also_returns_a_refresh_token(
+    grant, bearer_client: AuthClient
+) -> None:
+    minted = await bearer_client.oauth_token_from_session(
+        grant.session_token,
+        client_id=FIREFOX_DESKTOP_CLIENT_ID,
+        scope=OLDSYNC_SCOPE,
+        access_type="offline",
+    )
+    assert minted["refresh_token"]
+
+
+async def test_access_type_is_rejected_on_other_grants(
+    grant, bearer_client: AuthClient
+) -> None:
+    """`Joi.forbidden()` upstream on every grant but the direct one."""
+    with pytest.raises(ClientError) as caught:
+        await bearer_client.oauth_token(
+            client_id=FIREFOX_DESKTOP_CLIENT_ID,
+            grant_type="refresh_token",
+            refresh_token=grant.token["refresh_token"],
+            access_type="offline",
+        )
+    assert caught.value.errno == 109
+
+
+async def test_direct_grant_cannot_reach_a_scope_the_client_lacks(
+    grant, bearer_client: AuthClient
+) -> None:
+    """A key-bearing scope outside the client's allow-list is an error, not a trim."""
+    with pytest.raises(ClientError) as caught:
+        await bearer_client.oauth_token_from_session(
+            grant.session_token,
+            client_id=FIREFOX_DESKTOP_CLIENT_ID,
+            scope="https://identity.thunderbird.net/apps/sync",
+        )
+    assert caught.value.errno == 114
 
 
 # -- refresh tokens ----------------------------------------------------------

@@ -29,6 +29,13 @@ profile, the sign-in web page, the Sync tokenserver, and Sync storage — on a s
 - **Own tokenserver + syncstorage in Python/SQLite**, rather than syncstorage-rs + Postgres.
 - **Conformance testing via a Python port of `fxa-auth-client`**, plus known-answer vectors
   lifted from the reference `*.spec.ts` files.
+- **Support the `fxa-credentials` direct grant.** This reverses the original decision, which put
+  it out of scope alongside RFC 8693 token exchange on the reasoning that the code flow is what a
+  browser uses. Phase 8 established otherwise, from a packet trace rather than a reading: Firefox
+  Desktop completes the code flow, **destroys the refresh token it was just issued**, and mints
+  every subsequent access token — including the `apps/oldsync` one Sync runs on — from its
+  session token. Without this grant a real browser signs in and then never syncs. Token exchange
+  stays out of scope; nothing has been observed asking for it.
 - **Implement the JOSE subset rather than depend on `python-jose`** — evaluated at
   `resources/python-jose` 3.5.0 (`018b310d`) and rejected on three counts. It cannot do the half
   that matters: `ECDH-ES` is in `Algorithms.ALL` but excluded from `SUPPORTED`, and both
@@ -320,7 +327,8 @@ As built:
 ### Phase 3 — OAuth, profile, discovery ✅ done
 `GET /v1/jwks`, `POST /v1/oauth/authorization` (sessionToken-authed, PKCE S256, `keys_jwe`
 passthrough, service→scope resolution for `service=sync`), `POST /v1/oauth/token`
-(`authorization_code` + `refresh_token`, single-use codes, 15-min expiry),
+(`authorization_code` + `refresh_token` + `fxa-credentials` — see phase 8, which is where the
+third one turned out to be mandatory — single-use codes, 15-min expiry),
 `POST /v1/account/scoped-key-data`, `POST /v1/verify`, `POST /v1/introspect`,
 `POST /v1/oauth/destroy`, `GET /v1/client/{id}`, `GET /profile/v1/{profile,email,uid,display_name}`,
 `/.well-known/{openid-configuration,fxa-client-configuration}`.
@@ -328,6 +336,12 @@ passthrough, service→scope resolution for `service=sync`), `POST /v1/oauth/tok
 Collapse the internal `assertion` round-trip (`makeAssertionJWT` → `verifyAssertion`, HS256,
 60 s TTL) into a direct call — it exists upstream only because auth and oauth used to be separate
 services. Skip PPID, token-exchange, consent ledger, DAU metrics, subscriptions.
+
+That collapse is what makes the `fxa-credentials` grant nearly free when phase 8 forces it:
+upstream the grant means "present an assertion", and the assertion is something the server signs
+about a session token it is already holding. With one process the session token can be read
+directly, so the direct grant is `SessionClaims.for_session` plus the same
+`validate_requested_grant` the authorization route calls, and no assertion is ever constructed.
 
 As built:
 
@@ -692,6 +706,37 @@ source and each one is a sentence in phase 12:
 - Firefox for iOS: registered as `1b1a3e44c54fbb58`, but whether a shipping build can be pointed
   at a custom server at all is unknown. Establish it or record that it cannot, rather than leaving
   the README silent on a client the code claims to support.
+
+**Established so far** (desktop, Firefox on Linux, one origin on `http://localhost:9000`):
+
+- **A LAN IP over plain HTTP cannot work, and the reason is not FxA.** The sign-in page derives
+  the password with `crypto.subtle`, which browsers expose only in a secure context. `localhost`
+  and `127.0.0.1` qualify; `http://192.168.x.x` does not, and the page dies at
+  `crypto.subtle is undefined` after everything else has gone right. Serving a household off a
+  LAN address therefore needs real TLS — phase 11 has to provide it, not treat it as optional
+  polish. Upstream's own dev config is `http://localhost:9000` (`fxa-dev-launcher/profile.mjs`),
+  which is why this never shows up in their instructions.
+- **HTTPS-Only mode silently upgrades the request** before it leaves the browser, and the server
+  sees a TLS ClientHello on a plaintext socket — uvicorn logs `Invalid HTTP request received`
+  and no access-log line at all, which reads like a protocol bug and is not one. Loopback is
+  exempt from the upgrade; a LAN IP is not. The README has to say this.
+- **`grant_type=fxa-credentials` is mandatory.** See the amended decision above. The trace:
+  `login` → `scoped-key-data` → `keys` → `authorization` → `token` all succeed, and then Firefox
+  immediately calls `/v1/oauth/destroy` on the refresh token it was just handed and switches to
+  the direct grant for `profile` and for `apps/oldsync`, retrying on a loop when refused. Setting
+  `identity.fxaccounts.oauth.enabled = true` changes nothing — on this build the pref does not
+  exist, so the behaviour is not configurable away.
+- **`GET /v1/account/attached_clients` is missing** and Firefox polls it throughout the session.
+  It was not in the plan at all: the reference merges devices, sessions and authorized OAuth
+  clients into one flat list (`lib/routes/attached-clients.js`, `ConnectedServicesFactory`), and
+  every input already exists here. There is a simpler sibling, `GET /account/attached_oauth_clients`.
+- **One divergence found on the way past**: `_refresh_token_grant` widened a trusted client's
+  scope to `scope ∪ client.allowedScopes`, omitting `TRUSTED_CLIENT_ALLOWED_SCOPES`
+  (`openid`, `profile`, `email`, `profile:subscriptions` — `lib/oauth/grant.js`).
+  `validate_requested_grant` had it right; only the refresh path did not.
+
+Still open: whether Sync itself completes once tokens are minted (no tokenserver or storage
+request has been observed yet), `attached_clients`, and the whole Fenix half.
 
 ### Phase 9 — harden `crypto/jose.py` ✅ done
 
@@ -1094,7 +1139,9 @@ Email/SMTP entirely, password reset and recovery keys, TOTP/2FA/recovery codes/p
 sign-in unblock and the customs/rate-limit server (phase 10 reprices that last one as a
 denial-of-service question, not a feature), subscriptions and payments, push
 notifications and Send Tab, QR pairing (the channelserver), device commands, metrics/Glean/Sentry,
-the admin panel, and BrowserID (`/certificate/sign` is gone from the reference too).
+the admin panel, and BrowserID (`/certificate/sign` is gone from the reference too — note that
+the `fxa-credentials` grant is *not* BrowserID, despite upstream naming its payload field
+`assertion`; see phase 3).
 
 Send Tab and pairing are the two most likely "actually I do want that" additions later; both are
 additive and neither changes the schema decisions above.

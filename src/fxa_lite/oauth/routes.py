@@ -26,13 +26,14 @@ from fastapi import APIRouter, Request
 
 from .. import errors
 from ..accounts import now_ms
-from ..auth.credentials import Session, database
+from ..auth.credentials import Session, database, optional_session_credentials
 from ..crypto import jose
 from ..crypto.scoped_keys import NULL_KEY_ROTATION_SECRET
 from ..db import Account, Database, OauthCode
 from .clients import KEYS_CONDITIONAL_SCOPE, SERVICE_SCOPES, Client, Registry
 from .grant import (
     NON_REFRESHABLE_SCOPES,
+    TRUSTED_ALLOWED_SCOPES,
     Grant,
     GrantRequest,
     SessionClaims,
@@ -59,6 +60,9 @@ MAX_AGE_LEEWAY = 5
 
 GRANT_AUTHORIZATION_CODE = "authorization_code"
 GRANT_REFRESH_TOKEN = "refresh_token"
+#: The direct grant. Upstream names it for the assertion it used to carry; what
+#: it means now is "mint an access token from a session token".
+GRANT_FXA_CREDENTIALS = "fxa-credentials"
 
 router = APIRouter(tags=["oauth"])
 
@@ -250,13 +254,20 @@ def oauth_token(payload: TokenRequest, request: Request) -> dict[str, Any]:
 
     config = request.app.state.config
 
+    if payload.access_type is not None and payload.grant_type != GRANT_FXA_CREDENTIALS:
+        # `Joi.forbidden()` on every other grant: only the direct grant chooses
+        # between an access token and an access token plus a refresh token.
+        raise errors.oauth_invalid_request_parameter({"keys": ["access_type"]})
+
     if payload.grant_type == GRANT_AUTHORIZATION_CODE:
         grant = _authorization_code_grant(db, client, payload, config.ttl.authorization_code)
     elif payload.grant_type == GRANT_REFRESH_TOKEN:
         grant = _refresh_token_grant(db, client, payload)
+    elif payload.grant_type == GRANT_FXA_CREDENTIALS:
+        grant = _fxa_credentials_grant(client, payload, request)
     else:
-        # `fxa-credentials` and RFC 8693 token exchange are out of scope; saying
-        # so is better than a 500 from an unreachable branch.
+        # RFC 8693 token exchange is still out of scope; saying so is better
+        # than a 500 from an unreachable branch.
         raise errors.invalid_grant_type()
 
     ttl = min(payload.ttl or config.ttl.access_token, config.ttl.access_token)
@@ -354,7 +365,11 @@ def _refresh_token_grant(db: Database, client: Client, payload: TokenRequest) ->
         if not scope.contains(requested):
             # A trusted client may widen the grant, but only within its own
             # allow-list; anyone else is confined to what they already hold.
-            allowed = scope.union(client.allowed_scopes) if client.trusted else scope
+            allowed = (
+                scope.union(client.allowed_scopes).union(TRUSTED_ALLOWED_SCOPES)
+                if client.trusted
+                else scope
+            )
             if not allowed.contains(requested):
                 raise errors.invalid_scopes(requested.difference(scope).values())
         scope = requested
@@ -380,6 +395,42 @@ def _refresh_token_grant(db: Database, client: Client, payload: TokenRequest) ->
         amr=(),
         aal=0,
         offline=False,
+    )
+
+
+def _fxa_credentials_grant(client: Client, payload: TokenRequest, request: Request) -> Grant:
+    """The direct grant: a session token in, an access token out.
+
+    `validateAssertionGrant` verifies an assertion and hands the claims to
+    `validateRequestedGrant`.  Here the claims come off the session token that
+    authenticated the request, which is the same information by a shorter road
+    — the assertion upstream is signed and verified by one process about a
+    session it already holds.
+
+    Authentication is optional at the routing layer because the other two
+    grants do not use it, so a missing session token has to be caught here.
+    """
+    if not client.can_grant:
+        raise errors.invalid_grant_type()
+    # No non-public client has any business with a direct grant, and the
+    # reference checks it separately for exactly that "extra safety" reason.
+    if not client.public_client:
+        raise errors.not_public_client(client.id)
+    if payload.scope is None:
+        raise errors.oauth_invalid_request_parameter({"keys": ["scope"]})
+
+    credentials = optional_session_credentials(request)
+    if credentials is None:
+        raise errors.unauthorized("Token not found")
+
+    claims = SessionClaims.for_session(credentials.account, credentials.token)
+    return validate_requested_grant(
+        claims,
+        client,
+        GrantRequest(
+            scope=_parse_scope(payload.scope, "scope"),
+            access_type=payload.access_type or "online",
+        ),
     )
 
 

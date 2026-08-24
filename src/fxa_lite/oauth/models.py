@@ -51,7 +51,21 @@ class AuthorizationRequest(OauthPayload):
 
 
 class TokenRequest(OauthPayload):
-    """`POST /v1/oauth/token` — `authorization_code` or `refresh_token`."""
+    """`POST /v1/oauth/token` — `authorization_code`, `refresh_token` or
+    `fxa-credentials`.
+
+    The third is the direct grant, and it is here because Firefox Desktop will
+    not sync without it: having completed the web flow it destroys the refresh
+    token it was just issued and mints every subsequent access token straight
+    from its session token.  Upstream that grant carries an `assertion`, which
+    the auth server signs for itself and immediately verifies (`token.js`
+    `makeAssertionJWT`); with one process there is nothing to assert to, so the
+    session token authenticates the request directly and no `assertion` field
+    exists here.
+
+    `access_type` is legal only on `fxa-credentials`, matching the reference's
+    `Joi.forbidden()` on every other grant type.
+    """
 
     grant_type: str = "authorization_code"
     client_id: ClientId
@@ -60,6 +74,7 @@ class TokenRequest(OauthPayload):
     redirect_uri: str | None = Field(default=None, max_length=256)
     refresh_token: RefreshTokenValue | None = None
     scope: str | None = Field(default=None, max_length=2048)
+    access_type: str | None = None
     ttl: int | None = Field(default=None, gt=0)
 
 
