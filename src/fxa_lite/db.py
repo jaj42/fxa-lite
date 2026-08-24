@@ -1,0 +1,512 @@
+"""SQLite storage: connection handling, schema, and the account/token queries.
+
+One file, WAL mode, `sqlite3` from the stdlib.  The reference stack splits this
+across MySQL (accounts, tokens), Redis (sessions, devices) and Firestore; for a
+handful of accounts a single database is not a compromise, it is the point.
+
+Two conventions carried over from upstream, because they leak onto the wire:
+timestamps are **integer milliseconds** since the epoch, and every key, token id
+and uid is stored as a **lowercase hex string** rather than a blob — that is the
+form the API speaks, and hex round-trips through `sqlite3` without adapters.
+
+Connections are per-thread: FastAPI runs `def` routes in a worker pool, and a
+`sqlite3.Connection` may not cross threads.  WAL lets those threads read while
+one writes.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+#: Bumped whenever `SCHEMA` changes; stored in SQLite's `user_version`.
+SCHEMA_VERSION = 1
+
+MEMORY = Path(":memory:")
+
+SCHEMA = """
+CREATE TABLE accounts (
+    uid                TEXT    PRIMARY KEY,
+    email              TEXT    NOT NULL,
+    -- Lowercased email; the uniqueness constraint and every lookup use it, so
+    -- that Bob@example.com and bob@example.com cannot both be registered.
+    normalized_email   TEXT    NOT NULL UNIQUE,
+    email_code         TEXT    NOT NULL,
+    -- kA: never leaves the server except inside a keyFetchToken bundle.
+    ka                 TEXT    NOT NULL,
+    -- wrapKb XOR the password-derived wrapper; useless without the password.
+    wrap_wrap_kb       TEXT    NOT NULL,
+    auth_salt          TEXT    NOT NULL,
+    verify_hash        TEXT    NOT NULL,
+    verifier_version   INTEGER NOT NULL,
+    verifier_set_at    INTEGER NOT NULL,
+    created_at         INTEGER NOT NULL,
+    -- Milliseconds of the last key rotation; half of every Sync `kid`.
+    keys_changed_at    INTEGER NOT NULL,
+    profile_changed_at INTEGER NOT NULL,
+    locale             TEXT
+) STRICT;
+
+CREATE TABLE session_tokens (
+    token_id         TEXT    PRIMARY KEY,
+    uid              TEXT    NOT NULL REFERENCES accounts(uid) ON DELETE CASCADE,
+    -- The HAWK MAC key. Stored because the protocol says so; neither we nor the
+    -- reference server verifies a MAC with it.
+    auth_key         TEXT    NOT NULL,
+    created_at       INTEGER NOT NULL,
+    -- When the password was last checked; becomes `authAt` / the JWT `auth_time`.
+    auth_at          INTEGER NOT NULL,
+    last_access_time INTEGER NOT NULL,
+    user_agent       TEXT    NOT NULL DEFAULT ''
+) STRICT;
+
+CREATE INDEX session_tokens_uid ON session_tokens(uid);
+
+CREATE TABLE key_fetch_tokens (
+    token_id   TEXT    PRIMARY KEY,
+    uid        TEXT    NOT NULL REFERENCES accounts(uid) ON DELETE CASCADE,
+    auth_key   TEXT    NOT NULL,
+    -- kA || wrapKb, bundled at creation time under the token's bundleKey. The
+    -- token is single-use, so this row is deleted the moment it is read.
+    key_bundle TEXT    NOT NULL,
+    created_at INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX key_fetch_tokens_uid ON key_fetch_tokens(uid);
+
+CREATE TABLE devices (
+    id                    TEXT    PRIMARY KEY,
+    uid                   TEXT    NOT NULL REFERENCES accounts(uid) ON DELETE CASCADE,
+    -- A device is owned either by a session token (Desktop) or, later, by an
+    -- OAuth refresh token (mobile). Deleting the session deletes the device.
+    session_token_id      TEXT    REFERENCES session_tokens(token_id) ON DELETE CASCADE,
+    refresh_token_id      TEXT,
+    name                  TEXT    NOT NULL DEFAULT '',
+    type                  TEXT    NOT NULL DEFAULT '',
+    created_at            INTEGER NOT NULL,
+    push_callback         TEXT    NOT NULL DEFAULT '',
+    push_public_key       TEXT    NOT NULL DEFAULT '',
+    push_auth_key         TEXT    NOT NULL DEFAULT '',
+    push_endpoint_expired INTEGER NOT NULL DEFAULT 0,
+    available_commands    TEXT    NOT NULL DEFAULT '{}'
+) STRICT;
+
+CREATE INDEX devices_uid ON devices(uid);
+CREATE UNIQUE INDEX devices_session_token_id
+    ON devices(session_token_id) WHERE session_token_id IS NOT NULL;
+
+-- Phase 3 tables. Created here so there is one schema version, not two.
+CREATE TABLE oauth_codes (
+    code                  TEXT    PRIMARY KEY,
+    uid                   TEXT    NOT NULL REFERENCES accounts(uid) ON DELETE CASCADE,
+    client_id             TEXT    NOT NULL,
+    scope                 TEXT    NOT NULL,
+    created_at            INTEGER NOT NULL,
+    auth_at               INTEGER NOT NULL,
+    code_challenge        TEXT,
+    code_challenge_method TEXT,
+    -- The scoped-key bundle, encrypted to the client's public JWK. We never
+    -- decrypt it; we hand it back at token time.
+    keys_jwe              TEXT,
+    session_token_id      TEXT,
+    offline               INTEGER NOT NULL DEFAULT 0
+) STRICT;
+
+CREATE TABLE refresh_tokens (
+    token_id     TEXT    PRIMARY KEY,
+    uid          TEXT    NOT NULL REFERENCES accounts(uid) ON DELETE CASCADE,
+    client_id    TEXT    NOT NULL,
+    scope        TEXT    NOT NULL,
+    created_at   INTEGER NOT NULL,
+    last_used_at INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX refresh_tokens_uid ON refresh_tokens(uid);
+"""
+
+
+class DatabaseError(RuntimeError):
+    """Raised for a database that cannot be opened or is from a future version."""
+
+
+@dataclass(frozen=True, slots=True)
+class Account:
+    uid: str
+    email: str
+    normalized_email: str
+    email_code: str
+    ka: str
+    wrap_wrap_kb: str
+    auth_salt: str
+    verify_hash: str
+    verifier_version: int
+    verifier_set_at: int
+    created_at: int
+    keys_changed_at: int
+    profile_changed_at: int
+    locale: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionToken:
+    token_id: str
+    uid: str
+    auth_key: str
+    created_at: int
+    auth_at: int
+    last_access_time: int
+    user_agent: str = ""
+
+    @property
+    def last_auth_at(self) -> int:
+        """`SessionToken.lastAuthAt()` — seconds, and the JWT's `auth_time`."""
+        return (self.auth_at or self.created_at) // 1000
+
+
+@dataclass(frozen=True, slots=True)
+class KeyFetchToken:
+    token_id: str
+    uid: str
+    auth_key: str
+    key_bundle: str
+    created_at: int
+
+
+@dataclass(frozen=True, slots=True)
+class Device:
+    id: str
+    uid: str
+    session_token_id: str | None
+    refresh_token_id: str | None
+    name: str
+    type: str
+    created_at: int
+    push_callback: str
+    push_public_key: str
+    push_auth_key: str
+    push_endpoint_expired: bool
+    available_commands: dict[str, str] = field(default_factory=dict)
+
+
+class Database:
+    """Owns the connection pool and every statement fxa-lite runs."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self._local = threading.local()
+        self._keeper: sqlite3.Connection | None = None
+        if self.path == MEMORY:
+            # A plain `:memory:` database belongs to the connection that opened
+            # it, so per-thread connections would each get their own empty one.
+            # Shared cache plus one connection held open for our lifetime gives
+            # every thread the same database, and lets tests skip the disk.
+            self._dsn = f"file:fxa-lite-{id(self):x}?mode=memory&cache=shared"
+            self._uri = True
+            self._keeper = self._connect()
+        else:
+            self._dsn = str(self.path)
+            self._uri = False
+
+    # -- connection management ------------------------------------------------
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        connection: sqlite3.Connection | None = getattr(self._local, "connection", None)
+        if connection is None:
+            connection = self._connect()
+            self._local.connection = connection
+        return connection
+
+    def _connect(self) -> sqlite3.Connection:
+        if not self._uri:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            # `isolation_level=None` turns off the sqlite3 module's implicit
+            # transaction handling, so `transaction()` below is the only thing
+            # that opens one and its boundaries are visible in the code.
+            connection = sqlite3.connect(self._dsn, isolation_level=None, uri=self._uri)
+        except sqlite3.Error as exc:  # pragma: no cover - depends on the filesystem
+            raise DatabaseError(f"cannot open database {self.path}: {exc}") from exc
+        connection.row_factory = sqlite3.Row
+        if not self._uri:
+            # WAL is a file-format thing; an in-memory database stays in memory.
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("PRAGMA synchronous = NORMAL")
+        connection.execute("PRAGMA foreign_keys = ON")
+        # Wait rather than fail when another thread holds the write lock.
+        connection.execute("PRAGMA busy_timeout = 5000")
+        return connection
+
+    def close(self) -> None:
+        """Close this thread's connection. Other threads close theirs on exit."""
+        connection = getattr(self._local, "connection", None)
+        if connection is not None:
+            connection.close()
+            self._local.connection = None
+        if self._keeper is not None:
+            # Closing the last connection to a shared-cache memory database
+            # discards it, so this must go last.
+            self._keeper.close()
+            self._keeper = None
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        connection = self.connection
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            yield connection
+        except BaseException:
+            connection.execute("ROLLBACK")
+            raise
+        connection.execute("COMMIT")
+
+    def ping(self) -> None:
+        """`__heartbeat__`: prove the file is readable, not merely that we started."""
+        self.connection.execute("SELECT 1").fetchone()
+
+    # -- schema ---------------------------------------------------------------
+
+    def migrate(self) -> None:
+        """Create the schema, or refuse a database we are too old to understand."""
+        version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+        if version > SCHEMA_VERSION:
+            raise DatabaseError(
+                f"{self.path} was written by a newer fxa-lite "
+                f"(schema {version}, we speak {SCHEMA_VERSION})"
+            )
+        if version == SCHEMA_VERSION:
+            return
+        # `executescript` commits whatever transaction is open before it runs, so
+        # the BEGIN/COMMIT have to live inside the script for the DDL and the
+        # version stamp to land together. PRAGMA takes no parameter binding.
+        self.connection.executescript(
+            f"BEGIN IMMEDIATE;\n{SCHEMA}\nPRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;"
+        )
+
+    # -- accounts -------------------------------------------------------------
+
+    def create_account(self, account: Account) -> Account:
+        try:
+            self.connection.execute(
+                """
+                INSERT INTO accounts (
+                    uid, email, normalized_email, email_code, ka, wrap_wrap_kb,
+                    auth_salt, verify_hash, verifier_version, verifier_set_at,
+                    created_at, keys_changed_at, profile_changed_at, locale
+                ) VALUES (
+                    :uid, :email, :normalized_email, :email_code, :ka, :wrap_wrap_kb,
+                    :auth_salt, :verify_hash, :verifier_version, :verifier_set_at,
+                    :created_at, :keys_changed_at, :profile_changed_at, :locale
+                )
+                """,
+                _as_row(account),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise AccountExistsError(account.email) from exc
+        return account
+
+    def account(self, uid: str) -> Account | None:
+        return _one(
+            Account, self.connection.execute("SELECT * FROM accounts WHERE uid = ?", (uid,))
+        )
+
+    def account_by_email(self, email: str) -> Account | None:
+        return _one(
+            Account,
+            self.connection.execute(
+                "SELECT * FROM accounts WHERE normalized_email = ?", (normalize_email(email),)
+            ),
+        )
+
+    def accounts(self) -> list[Account]:
+        rows = self.connection.execute("SELECT * FROM accounts ORDER BY created_at")
+        return [Account(**dict(row)) for row in rows]
+
+    def delete_account(self, uid: str) -> bool:
+        # Tokens and devices go with it: every child table cascades on uid.
+        cursor = self.connection.execute("DELETE FROM accounts WHERE uid = ?", (uid,))
+        return cursor.rowcount > 0
+
+    def touch_profile(self, uid: str, at: int) -> None:
+        self.connection.execute(
+            "UPDATE accounts SET profile_changed_at = ? WHERE uid = ?", (at, uid)
+        )
+
+    # -- session tokens -------------------------------------------------------
+
+    def create_session_token(self, token: SessionToken) -> SessionToken:
+        self.connection.execute(
+            """
+            INSERT INTO session_tokens (
+                token_id, uid, auth_key, created_at, auth_at, last_access_time, user_agent
+            ) VALUES (
+                :token_id, :uid, :auth_key, :created_at, :auth_at, :last_access_time, :user_agent
+            )
+            """,
+            _as_row(token),
+        )
+        return token
+
+    def session_token(self, token_id: str) -> SessionToken | None:
+        return _one(
+            SessionToken,
+            self.connection.execute(
+                "SELECT * FROM session_tokens WHERE token_id = ?", (token_id,)
+            ),
+        )
+
+    def session_tokens(self, uid: str) -> list[SessionToken]:
+        rows = self.connection.execute(
+            "SELECT * FROM session_tokens WHERE uid = ? ORDER BY created_at", (uid,)
+        )
+        return [SessionToken(**dict(row)) for row in rows]
+
+    def touch_session_token(self, token_id: str, at: int) -> None:
+        self.connection.execute(
+            "UPDATE session_tokens SET last_access_time = ? WHERE token_id = ?", (at, token_id)
+        )
+
+    def reauthenticate_session_token(self, token_id: str, at: int) -> None:
+        """Record a fresh password check on an existing session (`/session/reauth`)."""
+        self.connection.execute(
+            "UPDATE session_tokens SET auth_at = ?, last_access_time = ? WHERE token_id = ?",
+            (at, at, token_id),
+        )
+
+    def delete_session_token(self, token_id: str) -> bool:
+        cursor = self.connection.execute(
+            "DELETE FROM session_tokens WHERE token_id = ?", (token_id,)
+        )
+        return cursor.rowcount > 0
+
+    # -- key fetch tokens -----------------------------------------------------
+
+    def create_key_fetch_token(self, token: KeyFetchToken) -> KeyFetchToken:
+        self.connection.execute(
+            """
+            INSERT INTO key_fetch_tokens (token_id, uid, auth_key, key_bundle, created_at)
+            VALUES (:token_id, :uid, :auth_key, :key_bundle, :created_at)
+            """,
+            _as_row(token),
+        )
+        return token
+
+    def key_fetch_token(self, token_id: str) -> KeyFetchToken | None:
+        return _one(
+            KeyFetchToken,
+            self.connection.execute(
+                "SELECT * FROM key_fetch_tokens WHERE token_id = ?", (token_id,)
+            ),
+        )
+
+    def delete_key_fetch_token(self, token_id: str) -> bool:
+        cursor = self.connection.execute(
+            "DELETE FROM key_fetch_tokens WHERE token_id = ?", (token_id,)
+        )
+        return cursor.rowcount > 0
+
+    # -- devices --------------------------------------------------------------
+
+    def upsert_device(self, device: Device) -> Device:
+        row = _as_row(device)
+        row["available_commands"] = json.dumps(device.available_commands, separators=(",", ":"))
+        row["push_endpoint_expired"] = int(device.push_endpoint_expired)
+        self.connection.execute(
+            """
+            INSERT INTO devices (
+                id, uid, session_token_id, refresh_token_id, name, type, created_at,
+                push_callback, push_public_key, push_auth_key, push_endpoint_expired,
+                available_commands
+            ) VALUES (
+                :id, :uid, :session_token_id, :refresh_token_id, :name, :type, :created_at,
+                :push_callback, :push_public_key, :push_auth_key, :push_endpoint_expired,
+                :available_commands
+            )
+            ON CONFLICT(id) DO UPDATE SET
+                session_token_id      = excluded.session_token_id,
+                refresh_token_id      = excluded.refresh_token_id,
+                name                  = excluded.name,
+                type                  = excluded.type,
+                push_callback         = excluded.push_callback,
+                push_public_key       = excluded.push_public_key,
+                push_auth_key         = excluded.push_auth_key,
+                push_endpoint_expired = excluded.push_endpoint_expired,
+                available_commands    = excluded.available_commands
+            """,
+            row,
+        )
+        return device
+
+    def device(self, uid: str, device_id: str) -> Device | None:
+        row = self.connection.execute(
+            "SELECT * FROM devices WHERE uid = ? AND id = ?", (uid, device_id)
+        ).fetchone()
+        return _device(row) if row else None
+
+    def device_by_session_token(self, token_id: str) -> Device | None:
+        row = self.connection.execute(
+            "SELECT * FROM devices WHERE session_token_id = ?", (token_id,)
+        ).fetchone()
+        return _device(row) if row else None
+
+    def devices(self, uid: str) -> list[Device]:
+        rows = self.connection.execute(
+            "SELECT * FROM devices WHERE uid = ? ORDER BY created_at", (uid,)
+        )
+        return [_device(row) for row in rows]
+
+    def delete_device(self, uid: str, device_id: str) -> Device | None:
+        """Delete a device and, with it, the session token that registered it."""
+        device = self.device(uid, device_id)
+        if device is None:
+            return None
+        with self.transaction() as connection:
+            connection.execute("DELETE FROM devices WHERE uid = ? AND id = ?", (uid, device_id))
+            if device.session_token_id:
+                connection.execute(
+                    "DELETE FROM session_tokens WHERE token_id = ?", (device.session_token_id,)
+                )
+        return device
+
+
+class AccountExistsError(Exception):
+    """Raised by `create_account` when the normalized email is already taken."""
+
+    def __init__(self, email: str) -> None:
+        super().__init__(f"account already exists: {email}")
+        self.email = email
+
+
+def normalize_email(email: str) -> str:
+    """Case-folded lookup key. Upstream lowercases; the local part is not really
+    case-insensitive, but every FxA client already assumes it is."""
+    return email.strip().lower()
+
+
+def open_database(path: str | Path) -> Database:
+    """Open (creating if needed) and migrate a database."""
+    database = Database(path)
+    database.migrate()
+    return database
+
+
+def _as_row(record: Any) -> dict[str, Any]:
+    return {slot: getattr(record, slot) for slot in record.__slots__}
+
+
+def _one(kind: type, cursor: sqlite3.Cursor) -> Any:
+    row = cursor.fetchone()
+    return kind(**dict(row)) if row else None
+
+
+def _device(row: sqlite3.Row) -> Device:
+    values = dict(row)
+    values["available_commands"] = json.loads(values["available_commands"])
+    values["push_endpoint_expired"] = bool(values["push_endpoint_expired"])
+    return Device(**values)

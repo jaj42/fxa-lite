@@ -8,13 +8,25 @@ See [plan.md](plan.md) for the design and the phase breakdown.
 
 ## Status
 
-Phase 0 (scaffolding) — config loading and signing-key generation.
+Phases 0–2 done: config and signing keys, the crypto core pinned to the
+reference test vectors, and the accounts API — sign-in, key fetch, sessions and
+devices. OAuth, the sign-in page and Sync itself are still ahead.
 
 ## Usage
 
 ```sh
-cp fxa.example.toml fxa.toml    # edit public_url to taste
-uv run fxa-lite keygen          # writes paths.signing_key (RSA-2048, RS256)
+cp fxa.example.toml fxa.toml            # edit public_url to taste
+uv run fxa-lite keygen                  # writes paths.signing_key (RSA-2048, RS256)
+uv run fxa-lite account add you@example.com
+uv run fxa-lite serve
+```
+
+There is no signup page and there will not be one: accounts are provisioned
+from the command line on the machine holding the database.
+
+```sh
+uv run fxa-lite account list
+uv run fxa-lite account remove you@example.com
 ```
 
 ## Development
