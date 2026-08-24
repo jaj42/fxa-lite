@@ -363,7 +363,7 @@ As built:
   `keys_jwe` → code → token → decrypt, and checks the recovered key against a derivation done
   straight from `kB` and the account's own `keysChangedAt`. `ruff check` and `ty check` clean.
 
-### Phase 4 — content server / WebChannel
+### Phase 4 — content server / WebChannel ✅ done
 Static HTML + vanilla JS (WebCrypto for PBKDF2/HKDF — the browser does the password stretching,
 we never see the password). Serve `/`, `/signin`, `/oauth/signin`, `/pair`, `/authorization`,
 `/settings`. Message sequence, per `packages/fxa-settings/src/lib/channels/firefox.ts`:
@@ -389,6 +389,45 @@ on OAuth flows** (`pages/Signin/utils.ts` — they cause intermittent sync disco
 
 Copy structure from `packages/fxa-settings/src/pages/WebChannelExample/index.tsx` (a minimal
 working emitter) and the browser-side mock in `packages/functional-tests/pages/layout.ts`.
+
+As built:
+
+- `content/` — one HTML shell, one stylesheet and three ES modules
+  (`crypto.js`, `api.js`, `webchannel.js`) driven by `app.js`, which picks the
+  view from `location.pathname` the way the reference SPA does. Firefox chooses
+  the URLs, so all of them are served: `/` (the email-first entry point
+  `identity.fxaccounts.autoconfig.uri` opens), `/signin`, `/oauth/signin`,
+  `/authorization`, `/settings` and `/settings/*`, `/pair` and
+  `/connect_another_device`, plus `/oauth/success/{client_id}` — a redirect
+  `oauth/clients.py` had been registering since phase 3 with nothing behind it.
+- `/` therefore belongs to the content server, and the auth server's landing
+  JSON now lives only at `/__version__`. Upstream can serve both because those
+  are two origins; here there is one.
+- No inline script anywhere, which is what lets the shell carry a CSP with no
+  `unsafe-inline` — plus `Referrer-Policy: no-referrer`, because the query
+  string holds `keys_jwk`, `state` and `code_challenge`, and `Cache-Control:
+  no-store`. Assets are served with an ETag and revalidated, so a redeploy is
+  picked up without a cache-busting name.
+- `app.js` builds every node with `createElement`/`createTextNode`; a test
+  asserts no asset contains `innerHTML`, which is what keeps a URL parameter
+  from becoming markup.
+- There is no "choose what to sync" screen: the page offers back exactly the
+  engines `fxa_status` named and declines nothing, which is where upstream
+  landed in June 2025 when it dropped the screen too.
+- Deliberate gaps, each answered rather than 404'd: `/pair` and
+  `/connect_another_device` say pairing needs a channel server, and `/settings`
+  says account management lives in the CLI, offering only `fxaccounts:logout`.
+- Verified two ways, both under node — the browser crypto is the one part of
+  fxa-lite pytest cannot reach directly, and a mistake in it fails as "Firefox
+  signs in but never syncs". `tests/js/crypto_kat.mjs` runs `crypto.js` against
+  the same vectors that pin `fxa_lite.crypto`, and seals a JWE that the Python
+  side opens — the only check that covers the `epk`, the concat KDF's algorithm
+  binding and the AAD at once. `tests/js/signin_harness.mjs` runs `app.js`
+  against a minimal DOM, a recording WebChannel and a real uvicorn on loopback,
+  pinning both rules above (`fxaccounts:login` first; no key material on it for
+  OAuth), their mirror image on `fx_desktop_v3`, and the whole flow from typed
+  password through to the oldsync key coming back out of `keys_jwe`.
+- 428 tests. `ruff check` and `ty check` clean.
 
 ### Phase 5 — tokenserver
 `GET /token/1.0/sync/1.5`, `Authorization: Bearer <access token>`, `X-KeyID: <kid>`. Verify the

@@ -2,9 +2,13 @@
 
 One app, one origin.  The accounts and OAuth APIs mount at `/v1` — the prefix
 the reference auth server uses, and the one it serves OAuth from too — the
-profile server at `/profile/v1`, and the discovery documents at the root.
+profile server at `/profile/v1`, the sign-in page and its assets at the root,
+and the discovery documents alongside them.
 `/.well-known/fxa-client-configuration` tells Firefox where each of those is,
 so the layout is ours to choose; see `wellknown.py`.
+
+The content router is included last, and `/` belongs to it: that is the URL
+Firefox opens to sign in.
 
 The error handlers matter as much as the routes.  A client reads `errno`, not
 the HTTP status, so an unhandled exception that escapes as FastAPI's default
@@ -24,7 +28,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 
-from . import __version__, auth, errors, profile, wellknown
+from . import __version__, auth, content, errors, profile, wellknown
 from .config import Config
 from .db import Database, open_database
 from .oauth import routes as oauth_routes
@@ -81,6 +85,7 @@ def create_app(
     app.include_router(oauth_routes.router, prefix=API_PREFIX)
     app.include_router(profile.router, prefix=PROFILE_PREFIX)
     app.include_router(wellknown.router)
+    app.include_router(content.router)
     _add_defaults(app, config)
     _add_error_handlers(app)
     return app
@@ -95,7 +100,9 @@ def _add_defaults(app: FastAPI, config: Config) -> None:
         "source": "https://github.com/jaj/fxa-lite",
     }
 
-    @app.get("/")
+    # No `/` alias for the version document: Firefox opens `/` to sign in, so
+    # the content server owns it. Upstream can serve both because the auth
+    # server and the content server are different origins.
     @app.get("/__version__")
     def version_handler() -> dict[str, Any]:
         return version

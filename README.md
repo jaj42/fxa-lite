@@ -8,12 +8,13 @@ See [plan.md](plan.md) for the design and the phase breakdown.
 
 ## Status
 
-Phases 0–3 done: config and signing keys, the crypto core pinned to the
+Phases 0–4 done: config and signing keys, the crypto core pinned to the
 reference test vectors, the accounts API — sign-in, key fetch, sessions and
-devices — and the OAuth tier: authorization codes with PKCE, JWT access tokens,
-refresh tokens, scoped-key metadata, the profile server and the two
-`.well-known` discovery documents. The sign-in page and Sync itself are still
-ahead.
+devices — the OAuth tier (authorization codes with PKCE, JWT access tokens,
+refresh tokens, scoped-key metadata), the profile server, the two
+`.well-known` discovery documents, and the sign-in page: static HTML and
+vanilla JS that stretches the password in the browser and speaks the Firefox
+WebChannel. Sync itself — the tokenserver and storage — is still ahead.
 
 ## Usage
 
@@ -39,3 +40,8 @@ uv run pytest
 uv run ruff check
 uv run ty check
 ```
+
+The sign-in page's JavaScript is exercised under `node`, which is the only way
+to reach it: `tests/test_content_crypto.py` runs it against the same
+known-answer vectors as the Python crypto, and `tests/test_content_flow.py`
+drives the whole flow against a real server. Both skip if `node` is missing.
