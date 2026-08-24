@@ -859,8 +859,22 @@ instrument this phase is read with, and a 404 in it should mean something.
    the 404 as "this is a fresh server", wipes it and uploads `meta/global` and `crypto/keys`. It
    asks twice because `_remoteSetup` re-fetches after `_freshStart`. On the fresh-profile run the
    whole pair should appear once and never again.
-2. The Fenix half, which has not been started and which needs TLS first (see the secure-context
-   finding above). The four questions at the top of this phase remain open, and so does iOS.
+2. The Fenix half, which has not been started and is **blocked on a real TLS origin**, not merely
+   inconvenienced by its absence: a phone cannot reach a desktop's `localhost`, and the LAN
+   address it could reach is not a secure context, so `crypto.subtle` is undefined and the sign-in
+   page dies at the password field (see the secure-context finding above). The unblocking work is
+   a host with a certificate and `deploy/nginx.conf.example` in front of it — named as a phase 11
+   deliverable, and the one piece of that phase that may have to land early, since the four
+   questions at the top of this phase cannot be answered without it. iOS likewise.
+
+   **This is what decides the order of the remaining phases.** Phase 10 opens with "the code is
+   complete… so there is a fixed target to audit", and the mobile pass is the most likely source
+   of new routes — desktop produced three code changes from a trace after six phases of reading.
+   Auditing, then adding routes, then re-auditing is the worse sequence, so the argument is to
+   pull phase 11's proxy work forward far enough to point a phone at fxa-lite and close this
+   phase, rather than to defer mobile past the audit. If that trade is refused, the honest
+   alternative is to split the phase in the plan — 8a desktop, done; 8b mobile, after 11 — rather
+   than leave it looking half-finished.
 
 ### Phase 9 — harden `crypto/jose.py` ✅ done
 
@@ -1128,10 +1142,50 @@ runs as, so the smoke test should assert both the mode and the owner after a con
 **Compose, one service, hardened by default.** `read_only: true` with a `tmpfs: /tmp` (all state
 is `/data`, so the root filesystem has no reason to be writable), `cap_drop: [ALL]`,
 `security_opt: [no-new-privileges:true]`, `restart: unless-stopped`, an explicit `user:`, and the
-loopback port publication above. No nginx, no Caddy, no certificate machinery in this file: TLS is
-the host's job and bundling a proxy would double the surface of a project whose entire argument is
-that the reference deployment has too many moving parts. A commented-out Caddy service in the
-compose file is the most that is warranted, and even that is arguable.
+loopback port publication above.
+
+**TLS, and a reversal.** This phase originally said no nginx, no Caddy and no certificate
+machinery — TLS is the host's job, and bundling a proxy doubles the surface of a project whose
+whole argument is that the reference deployment has too many moving parts. Phase 8 overruled the
+premise: the sign-in page stretches the password with `crypto.subtle`, which browsers expose only
+in a secure context, so **a phone cannot sign in over plain HTTP at all**. TLS is not the
+deployment polish this phase took it for; it is the difference between a working household server
+and a desktop-only toy. "The host's job" is a fine answer for somebody who already runs a proxy
+and a dead end for the person this project is for.
+
+So the middle: the *default* stack stays one service, and the proxy is opt-in.
+
+- **`deploy/nginx.conf.example`** — a complete server block for one origin in front of
+  `127.0.0.1:9000`, annotated the way `fxa.example.toml` is. It is the deliverable that unblocks
+  phase 8's mobile half, and it may have to land ahead of the rest of this phase.
+- **An `nginx` service in `docker-compose.yaml` behind `profiles: ["tls"]`**, so
+  `docker compose up -d` is still one container and `docker compose --profile tls up -d` is the
+  public deployment. It mounts the example config and the host's certificate directory read-only;
+  it does **not** run certbot. Issuance stays one documented `certbot certonly` on the host plus a
+  renewal hook that reloads the container — a compose file that mints certificates is exactly the
+  entrypoint-generates-secrets pattern this phase refuses elsewhere. With the proxy up, the app
+  service publishes nothing to the host at all; nginx reaches it over the compose network.
+
+Five things the example config has to get right, each of which is a specific failure fxa-lite
+would show as something else:
+
+- **`client_max_body_size` at least 2625536 bytes** — `/info/configuration` advertises
+  `max_request_bytes` = 2625536, and Firefox believes it. nginx's 1 MB default turns a history
+  batch into a 413 that never reaches the app, and the client reads it as a stalled sync.
+- **One `location /`, proxying to one upstream, with no path rewriting.** The discovery document
+  and the tokenserver's `api_endpoint` are built from `public_url`, and HAWK signatures cover the
+  URL the tokenserver handed out; a proxy that strips or adds a prefix breaks every signature at
+  once. Whatever TLS terminates on must be the origin `public_url` names, exactly.
+- **`proxy_set_header Host $host` and `X-Forwarded-Proto https` are courtesy, not load-bearing** —
+  fxa-lite reads `public_url` and never the request's `Host` (phase 6, deliberately). Say so in
+  the file, or the next person will spend an afternoon on headers that change nothing.
+- **HSTS belongs here**, since the app does not set it and a secure context is now a hard
+  requirement rather than a preference. So does the redirect from `:80`, with the ACME challenge
+  location carved out ahead of it.
+- **The rate limit phase 10 has to decide about.** `limit_req_zone` on `/v1/account/login`,
+  `/v1/account/create` and `/v1/session/reauth` is the proxy-level half of that decision; if the
+  audit lands on "documented as required rather than suggested", this file is where the
+  requirement is met and it must ship uncommented.
 
 `HEALTHCHECK` targets `/__heartbeat__`, which pings the database rather than merely answering —
 `/__lbheartbeat__` cannot tell a broken volume from a healthy one. There is no `curl` in a slim
@@ -1157,7 +1211,8 @@ any bind-mount-and-watch arrangement, and `tests/js/*.mjs` need `node`, which ha
 deployment image. `docker compose watch` is documented in the uv guide and is the right tool for a
 different project; note the decision so the question is not reopened.
 
-**Deliverables:** `Dockerfile`, `docker-compose.yaml`, `.dockerignore`, a `scripts/docker-smoke.sh`
+**Deliverables:** `Dockerfile`, `docker-compose.yaml` (with the `tls` profile),
+`deploy/nginx.conf.example`, `.dockerignore`, a `scripts/docker-smoke.sh`
 that builds the image and drives keygen → `account add --password` → `up` → assert the discovery
 document and `/__heartbeat__` → assert the secrets are absent from the image, and the
 `fxa.example.toml` comment on `public_url` behind a proxy. Phase 12's CI builds the image on PR
