@@ -29,6 +29,17 @@ profile, the sign-in web page, the Sync tokenserver, and Sync storage — on a s
 - **Own tokenserver + syncstorage in Python/SQLite**, rather than syncstorage-rs + Postgres.
 - **Conformance testing via a Python port of `fxa-auth-client`**, plus known-answer vectors
   lifted from the reference `*.spec.ts` files.
+- **Implement the JOSE subset rather than depend on `python-jose`** — evaluated at
+  `resources/python-jose` 3.5.0 (`018b310d`) and rejected on three counts. It cannot do the half
+  that matters: `ECDH-ES` is in `Algorithms.ALL` but excluded from `SUPPORTED`, and both
+  `jwe.encrypt` and `jwe.decrypt` gate on `SUPPORTED` (`jose/jwe.py:46-49`, `99-102`), so
+  `keys_jwe` raises `JWEError`. It costs three dependencies rather than one, and the wrong three:
+  `install_requires` is `ecdsa`, `rsa`, `pyasn1` — pure-Python crypto shipped as the *default*
+  backend, `cryptography` only an extra — and `ecdsa` documents itself as not side-channel
+  resistant. And the "benefit from the library's evolution" argument, which is the whole reason to
+  take a dependency here, does not hold for this one: 3.4.0 (Feb 2025) is where CVE-2024-33663 and
+  CVE-2024-33664 were fixed and 3.5.0 (May 2025) is the last release. Phase 9 gives `joserfc` and
+  `jwcrypto` — both built on `cryptography` — one bounded look before hardening what we have.
 
 ---
 
@@ -550,7 +561,44 @@ As built:
   tokenserver → HAWK-signed PUT → read back, which is the test that fails if any two tiers
   disagree about what they hand each other. `ruff check` and `ty check` clean.
 
-### Phase 7 — real Firefox
+### Phase 7 — pin the upstream commits
+
+`resources/` is gitignored and untracked, so nothing in this repository records what "the
+reference" *is*. Every "verified against the reference" claim above, and every constant in
+**Protocol constants**, is true of one commit and unverified against any other; if those
+checkouts are deleted the provenance goes with them. This is fifteen minutes of work and it
+blocks phase 11, so it goes first.
+
+- `UPSTREAM.toml` at the repo root — tracked, unlike `resources/`. Per checkout: the clone URL,
+  the commit fxa-lite was read against, its date, and one line on what we took.
+
+  ```
+  mozilla/fxa                      b522aa57  2026-08-22  protocol, KATs, accounts/OAuth/profile
+  mozilla-services/syncstorage-rs  3f0f985c  2026-08-21  tokenserver, Sync 1.5, tokenlib, HAWK
+  jackyzy823/fxa-selfhosting       200626f1  2026-08-21  what self-hosting the real thing costs
+  michielbdejong/fxa-self-hosting  2343760c  2016-05-13  historical only — ten years stale
+  mpdavis/python-jose              018b310d  2025-05-28  evaluated, not adopted — see above
+  ```
+
+- Per repo, the **paths we actually read**, not the repo. `mozilla/fxa` is a monorepo whose churn
+  is overwhelmingly subscriptions, Glean and the settings SPA, none of which we implement. The
+  files that matter are already enumerated throughout this plan — `lib/crypto/*`, `lib/tokens/*`,
+  `lib/oauth/*`, `lib/routes/auth-schemes/hawk-fxa-token.js`, `crypto-relier/…/scoped-keys.ts`,
+  `fxa-auth-client/lib/*`, `fxa-settings/src/lib/channels/firefox.ts`; syncstorage-rs's are
+  `tokenserver-auth/src/token/native.rs`, `syncserver/src/tokenserver/*`,
+  `syncserver/src/web/auth.rs`, `syncstorage-*/src/db/*`. Collecting that list into the file is
+  what makes the diff readable instead of two thousand irrelevant commits.
+- `scripts/upstream-diff.sh` — per entry,
+  `git -C resources/<repo> log --oneline <pinned>..origin/main -- <paths>`.
+  A log, not a diff: a protocol change shows up as a commit touching `lib/crypto/` and nothing
+  else does.
+- Bump a pin only together with the code or the note that answers its diff, so the file always
+  means "fxa-lite is current with respect to this commit" and never "this is where we last looked".
+- A test asserting every path in `UPSTREAM.toml` exists in its checkout, skipped when `resources/`
+  is absent. Upstream renames files; a stale path makes the diff *empty*, which reads as "nothing
+  changed" — the one failure mode this file cannot survive.
+
+### Phase 8 — real Firefox
 Fresh profile, `about:config`:
 ```
 identity.fxaccounts.autoconfig.uri   = https://<host>/
@@ -561,6 +609,193 @@ The single-pref form is preferred; the explicit alternative (`identity.fxaccount
 `.remote.oauth.uri`, `.remote.profile.uri`, `identity.sync.tokenserver.uri`) is documented in
 `resources/fxa-selfhosting/init.sh:143-166` if autoconfig misbehaves.
 Reference pref list: `resources/fxa/packages/fxa-dev-launcher/profile.mjs`.
+
+### Phase 9 — harden `crypto/jose.py`
+
+The "don't roll your own crypto" instinct is right, and its target is smaller than it looks.
+`crypto/hkdf.py`, `onepw.py`, `tokens.py` and `scoped_keys.py` are FxA protocol derivations — no
+library implements them and none ever will; what makes them safe is the phase 1 KAT suite. The
+whole exposure is `crypto/jose.py` (418 lines), and only two parts of it are our own crypto: RS256
+sign/verify (~90 lines) and compact JWE ECDH-ES+A256GCM (~150). The rest is JWK plumbing over
+`cryptography`.
+
+**First, timeboxed: `joserfc` and `jwcrypto`.** `python-jose` is already answered (see *Decisions
+already made*) but that answer does not transfer — both of these build on `cryptography` rather
+than shipping their own, so the dependency objection does not apply, and both are expected to
+implement ECDH-ES. Two questions decide it, and a "no" to either ends the look:
+
+- Does it do RS256 **and** compact ECDH-ES+A256GCM against `tests/vectors/` unchanged?
+- Can `alg` be pinned to one value at the call site? fxa-lite rejects `alg: none` by construction;
+  an allow-list *argument* is a thing a later edit widens by accident.
+
+Expect no, for a reason that is about timing rather than quality: `jose.py` is written, pinned by
+vectors, and interoperating across six green phases. The case for a library is strongest before
+the code exists; afterwards it is a rewrite of the most delicate file in the project against
+modest upside. The one argument that survives that is the one worth the hour — a library gets
+patched when a JOSE parsing CVE lands, and this file does not. Record the outcome either way.
+
+**Then the actual work, which is needed whichever way that goes**: the coverage a library would
+have bought is adversarial, not fewer lines. `jose.py` is today pinned by positive vectors —
+RFC 7518 App. C for the concat KDF, RFC 7516 App. A.1 for the AEAD framing — and every path
+through it that a hostile input takes is untested.
+
+- Negative tests on every JWT parse path: `alg: none`; `alg` swapped to HS256 with the public key
+  as the HMAC secret; unknown `kid`; missing `exp`; `exp`/`iat` as strings; five segments; zero
+  segments; a megabyte of header.
+- The same for JWE: `epk` on the wrong curve; `epk` off-curve (the invalid-curve attack —
+  `cryptography` rejects it, so assert that it does); tampered AAD; tampered tag; `enc` swapped;
+  a `zip` we do not support; an oversized body (python-jose's own 250 KiB cap is a fair precedent).
+- The RS256 vectors from RFC 7515 App. A.2, which we do not currently have.
+- `hypothesis` round-trip properties over both.
+
+Delete `encrypt_jwe_dir` while the file is open: it is referenced only by `tests/test_jwe.py` and
+nothing on the wire. If a library *is* adopted after all, the **Dependencies** section above stops
+being true and needs saying so.
+
+This is the audit's largest single input, which is why it lands before phase 10 rather than after.
+
+### Phase 10 — security audit
+
+The code is complete and the dependency set is settled, so there is a fixed target to audit.
+Two things make this worth doing properly rather than as a `bandit` run: the threat model is
+unusual — an internet-facing sign-in endpoint guarding a household's entire browsing history,
+operated by one person with no ops team — and this codebase departs from the reference in a dozen
+deliberate places, each of which is a security decision no one but its author has reviewed.
+
+**1. The divergences, first, because they are the unreviewed part.** Collect every "deliberate
+divergence" from the phases above into one list — phase 11 documents the same list, so build it
+here — and re-derive each argument rather than re-reading its original justification:
+
+- accounts-API HAWK MACs parsed and discarded (`auth/credentials.py`, matching
+  `hawk-fxa-token.js`). The conclusion that the tokenId *is* the credential is upstream's; confirm
+  nothing in fxa-lite grants more on a HAWK header than on the equivalent Bearer one.
+- `strictScopeValidation` on, unregistered scopes dropped (`oauth/grant.py`) — stricter than
+  upstream; confirm a drop cannot become a grant on the refresh path.
+- `aud` checked at the tokenserver — stricter; confirm `grant.py` is the only thing minting that
+  audience.
+- the storage HAWK payload hash **is** verified — stricter, and the most interesting item here:
+  confirm the "client sent no hash" path is genuinely the specification's and not a bypass. An
+  attacker who strips `hash=` from a captured signed request gets a body they can rewrite; work
+  out exactly what the MAC still covers and whether that is enough.
+- `tokenserver_shared_secret` derived from the OAuth signing key when unset — confirm the
+  derivation is domain-separated from every other use of that key.
+- the two upstream bugs deliberately not reproduced (`do_append`, wipe-vs-open-batch) — confirm
+  not reproducing them cannot be driven the other way by a client that expects them.
+- `upgradeNeeded: false`, `metricsEnabled: false`, `/v1/oauth/destroy` not revoking access tokens,
+  `acr_values=AAL2` refused with errno 120.
+
+**2. The out-of-scope list, repriced as security rather than as features.**
+
+- **There is no rate limiting anywhere.** The customs server was dropped and nothing took its
+  place. `POST /v1/account/login` runs scrypt at N=65536, r=8 — roughly 64 MB and ~100 ms of
+  *server* work per unauthenticated request, on a machine that is also somebody's NAS. That is a
+  denial-of-service amplifier before it is a password-guessing surface. Decide explicitly: a
+  per-IP and per-email limiter in front of the scrypt call, or a proxy-level limit documented as
+  *required* rather than suggested, or accepted with the reasoning written down. Do not leave it
+  undecided, which is what it is today.
+- No password reset means a forgotten password is unrecoverable **and** that there is no reset
+  flow to attack. State both; only one of them is a cost.
+- No 2FA means the password is the entire authenticator for `kB`. The CLI's 12-character minimum
+  is the only control, and nothing rotates the key it protects.
+
+**3. The mechanical sweep, where tooling reads better than a human.**
+
+- `ruff`'s `S` ruleset (flake8-bandit) added to `select`, which is `["E","F","I","UP","B","SIM"]`
+  today — so none of it has ever run. Expect noise around `assert` in tests; scope it per directory.
+- SQL built with f-strings: `syncstorage/store.py:246`, `:387`, `:447` interpolate placeholder and
+  column lists. That is legitimate and it is also exactly what a real injection looks like at a
+  glance. Confirm every interpolated fragment derives from a literal and never from request data,
+  and pin that with a test.
+- `hmac.compare_digest` on every secret comparison — 9 call sites today. Audit for a `==` that
+  should be one, especially password verify, token lookup and the HAWK MAC.
+- Request limits: pydantic caps individual fields (`oauth/models.py`), but nothing caps a request
+  body, a batch, a collection or the database, and uvicorn imposes no body limit by default. An
+  unauthenticated 2 GB POST is currently a memory event.
+- `/storage/{collection}/{id}`: ids reach a table rather than a filesystem, but confirm the
+  validation and pin it.
+- The four handlers in `app.py`, the bare `Exception` one included: confirm no path leaks a
+  traceback, a SQL fragment or a filesystem path into any of the three envelopes.
+- Secrets at rest: the signing key is written 0600 by `keygen` — confirm `serve` never widens it —
+  plus the SQLite file mode, and what a database leak actually yields. Codes and refresh tokens
+  are stored under `sha256`; confirm session and keyFetch rows store only the derived id.
+- Dependency audit and lockfile pinning; a floor on `cryptography` that is not merely "whatever
+  resolved".
+
+**4. Deployment, which is where a household server actually gets breached.** TLS termination;
+`identity.fxaccounts.allowHttp` never set outside a LAN test; `public_url` versus a rewriting
+proxy — phase 6 already made HAWK read `public_url` rather than `Host`, so confirm nothing else
+reads `Host`; the WebChannel origin allowlist; CSP and `Referrer-Policy` on every content route
+rather than only on the shell. This ends as a "Deploying this safely" page, which is a phase 11
+deliverable.
+
+Run `/security-review` over the branch as one input, not as the audit: it reviews a diff, and the
+findings that matter here are architectural and span all six tiers.
+
+Deliverable: findings triaged fixed / accepted-with-reason / out-of-scope, with the accepted ones
+written into the docs rather than into a file nobody opens. Every fix lands with a test, as
+everything else in this project has. Then re-run the suite **and** phase 8 against real Firefox —
+the audit will touch auth-path code, and that path has exactly one integration test that matters.
+
+### Phase 11 — documentation and CI
+
+Sphinx under `docs/`, published to GitHub Pages by `.github/workflows/`. There is no CI at all
+today: "`ruff check` and `ty check` clean" at the end of every phase is a claim a human made six
+times. So the first workflow to write is not the docs one.
+
+**CI** (`.github/workflows/ci.yml`) — beyond what was asked; drop it if you want the docs alone.
+`uv sync`, then `pytest`, `ruff check`, `ty check`, on push and PR. The catch: the node-driven
+content tests (`tests/js/*.mjs`) *skip* when `node` is absent, so the runner needs
+`actions/setup-node` or they quietly do not run — and they are the only coverage of the
+browser-side crypto, which is the coverage this project can least afford to lose silently. Assert
+the collected count, or make them fail rather than skip when `CI` is set.
+
+**Docs** (`docs/`, with `sphinx`, `myst-parser`, `furo` and `sphinxcontrib-mermaid` in a `docs`
+dependency group — never a runtime dependency):
+
+- *Running it.* The README's four commands are the quickstart and stay in the README; pull them in
+  with a MyST `include` rather than copying, or the two drift within a month. The page around them
+  is what the README deliberately is not: `fxa.example.toml` walked key by key, `keygen` and what
+  a rotation costs, reverse proxy and TLS, the `about:config` prefs from phase 8, and backup —
+  one SQLite file plus one key file, and what happens when you lose either.
+- *Architecture.* The prefix table above, the six tiers and why they are one process, the schema
+  and each table's lifetime, and the three error envelopes together with the reason there are
+  three. A reader's first instinct is that this is sloppiness; the doc should say otherwise before
+  they open the PR.
+- *Message flow.* Mermaid sequence diagrams — the thing this project currently has no
+  representation of anywhere. Three: the WebChannel handshake (`fxa_status` → `can_link_account` →
+  `login` → `oauth_login`, with phase 4's two ordering rules marked *on the diagram*, since they
+  are what a reimplementer gets wrong); sign-in from typed password through PBKDF2 to `kB`; and
+  the sync flow from `kB` through scoped-key derivation, `keys_jwe`, the code exchange, the
+  tokenserver and into a HAWK-signed storage request. That last one is
+  `test_the_whole_stack_composes` drawn as a picture — keep the two side by side so neither can
+  drift alone.
+- *Provenance and divergences.* The chapter that justifies the project's existence. Phase 7's
+  `UPSTREAM.toml` rendered as a table — which reference, which commit, which files, what we took —
+  then the divergence list phase 10 assembled: what upstream does, what fxa-lite does, why, and
+  what it costs. Source it from one place, not two: either mark each divergence in the code with a
+  uniform `# DIVERGENCE:` comment and generate the table, or author the table and add a test
+  asserting markers and rows agree. There are zero such markers today; the information lives in
+  prose in this plan and in comments at the routes, which is exactly why phase 10 has to collect
+  it before phase 11 can publish it.
+  One caution, since this chapter is public: "here is where our auth server is deliberately unlike
+  the reference" is a useful document for somebody attacking a running instance. Write the
+  reasoning, not an exploitation path, and put the operator-dependent phase 10 items — rate
+  limiting, TLS — in the deployment page as instructions rather than here as a list of what is
+  missing.
+- *Crypto API.* `autodoc` over `fxa_lite.crypto`, whose docstrings already carry the protocol
+  constants and the traps. Nearly free, and it is the part of the code most likely to be read by
+  someone porting this elsewhere.
+
+**Pages** (`.github/workflows/docs.yml`): `actions/configure-pages`, `upload-pages-artifact`,
+`deploy-pages`; `permissions: {pages: write, id-token: write}`; on push to `main`, build-only on
+PR. Build with `sphinx-build -W`, so a broken cross-reference fails CI instead of shipping — and
+this documentation is nothing but cross-references. Pages has to be enabled on `jaj42/fxa-lite`
+with "GitHub Actions" as the source, a one-time manual step in the repository settings that no
+workflow can do for you.
+
+Last: once the docs carry the architecture and the flows, `plan.md` stops being the only place
+they exist. Decide then whether the plan stays as a build log or is retired into the docs. Do not
+do both by half.
 
 ---
 
@@ -574,12 +809,15 @@ Reference pref list: `resources/fxa/packages/fxa-dev-launcher/profile.mjs`.
   `keys_jwe` client-side → assert the recovered oldsync key equals a direct derivation from `kB`.
 - Sync-tier test: that access token → tokenserver → HAWK-sign a BSO PUT → read it back.
 - `ruff check` + `ty check`.
-- Manual: Phase 7, then `about:sync-log` and the Sync panel in `about:preferences#sync`.
+- Manual: Phase 8, then `about:sync-log` and the Sync panel in `about:preferences#sync`.
+- CI runs the first four of these from phase 11 on; until then they are run by hand, and
+  `tests/js/*.mjs` silently skip wherever `node` is missing.
 
 ## Deliberately out of scope
 
 Email/SMTP entirely, password reset and recovery keys, TOTP/2FA/recovery codes/passkeys,
-sign-in unblock and the customs/rate-limit server, subscriptions and payments, push
+sign-in unblock and the customs/rate-limit server (phase 10 reprices that last one as a
+denial-of-service question, not a feature), subscriptions and payments, push
 notifications and Send Tab, QR pairing (the channelserver), device commands, metrics/Glean/Sentry,
 the admin panel, and BrowserID (`/certificate/sign` is gone from the reference too).
 
