@@ -657,6 +657,41 @@ The single-pref form is preferred; the explicit alternative (`identity.fxaccount
 `resources/fxa-selfhosting/init.sh:143-166` if autoconfig misbehaves.
 Reference pref list: `resources/fxa/packages/fxa-dev-launcher/profile.mjs`.
 
+**Firefox for Android (Fenix), which is the other half of a household.** There is no
+`about:config`; the equivalent is the secret menu — Settings → About Firefox → tap the logo five
+times → Settings → **Sync Debug** — and two text fields, named *Custom Mozilla account server*
+(*Custom Firefox Account server* in older builds) and *Custom Sync server*. With everything on one
+origin they are:
+
+```
+Custom Mozilla account server = https://<host>
+Custom Sync server            = https://<host>/token/1.0/sync/1.5
+```
+
+Note the asymmetry, which is the thing a person gets wrong: the account field is an **origin**,
+from which the app reads `/.well-known/fxa-client-configuration` exactly as desktop does, while
+the sync field is a **full tokenserver URL including `/1.0/sync/1.5`** — upstream those are two
+deployments and the field predates discovery. `resources/fxa-selfhosting/init.sh:184` and its
+README:103 are the reference for both spellings. Fenix is already registered as a client
+(`a2270f727f45f648`, `oauth/clients.py:39`) with `<public_url>/oauth/success/<client_id>` among
+its redirects, and the content server already serves that path, so nothing in fxa-lite should need
+changing — which is a hypothesis, not a result, until a phone has synced.
+
+Four things this phase has to establish, because the docs cannot be written from a reading of the
+source and each one is a sentence in phase 12:
+
+- whether the *Custom Sync server* field is needed at all, given that our discovery document
+  already advertises `sync_tokenserver_base_url` — if the app prefers discovery when the override
+  is blank, the honest instruction is one field, not two;
+- what the fields do to an already-signed-in profile: whether they require signing out first, and
+  whether the app restarts;
+- whether *Use New React Mozilla Account page* changes which content-server path the app opens,
+  since our shell answers a fixed table of paths (`content/__init__.py:PAGE_PATHS`) and a path
+  outside it is a 404 in a web view;
+- Firefox for iOS: registered as `1b1a3e44c54fbb58`, but whether a shipping build can be pointed
+  at a custom server at all is unknown. Establish it or record that it cannot, rather than leaving
+  the README silent on a client the code claims to support.
+
 ### Phase 9 — harden `crypto/jose.py`
 
 The "don't roll your own crypto" instinct is right, and its target is smaller than it looks.
@@ -924,6 +959,14 @@ dependency group — never a runtime dependency):
   ownership caveat and the `public_url`-behind-a-proxy rule. This is also where phase 10's
   operator-dependent findings land as instructions — TLS termination and the rate limit in front
   of the scrypt call are compose-level answers as much as they are code-level ones.
+- *Pointing a browser at it.* Every client, in one table, derived from `public_url` and nothing
+  else: the desktop `about:config` prefs, and — the half that is missing from every self-hosting
+  write-up including this plan until now — Fenix's Sync Debug fields, with the secret-menu route to
+  them and the origin-versus-full-URL asymmetry between the two called out, since that is where the
+  attempt fails. Whatever phase 8 establishes about the optional sync field, the sign-out
+  requirement and iOS lands here as instructions. A short version of this table goes in the README
+  as well — the question "what do I type into my phone" arrives before anyone opens the docs — so
+  include it from one source rather than writing it twice.
 - *Architecture.* The prefix table above, the six tiers and why they are one process, the schema
   and each table's lifetime, and the three error envelopes together with the reason there are
   three. A reader's first instinct is that this is sloppiness; the doc should say otherwise before
