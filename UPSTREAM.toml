@@ -1,0 +1,146 @@
+# What "the reference" means.
+#
+# fxa-lite is a reimplementation, not a fork: every protocol constant in plan.md and every
+# "matches the reference" claim in the source was read out of a checkout under `resources/`,
+# which is gitignored and untracked.  Without this file that provenance lives only on the
+# machine that did the reading, and a claim that cannot name its source is not a claim.
+#
+# Each entry pins one checkout to the commit fxa-lite was read against, and lists the paths
+# that were actually read — not the repository.  mozilla/fxa is a monorepo whose churn is
+# overwhelmingly subscriptions, Glean and the settings SPA, none of which we implement; the
+# point of the path list is that `scripts/upstream-diff.sh` shows a protocol change as a
+# handful of commits instead of two thousand irrelevant ones.
+#
+# Bump a pin only together with the code change, or the note, that answers its diff.  The file
+# then always means "fxa-lite is current with respect to this commit", never "this is where we
+# last happened to look".
+#
+# `tests/test_upstream.py` asserts every path below still exists in its checkout, and skips
+# when `resources/` is absent.  Upstream renames files, and a stale path makes the diff *empty*
+# — which reads as "nothing changed", the one failure mode this file cannot survive.
+
+[[repo]]
+dir = "fxa"
+url = "https://github.com/mozilla/fxa"
+branch = "main"
+commit = "b522aa57dddaf6e8d851f05b5103e5e3c4b4a6bf"
+date = "2026-08-22"
+took = "the onepw protocol and its KATs, token derivation, the accounts/OAuth/profile wire format, and the WebChannel handshake"
+paths = [
+  # The client half of onepw — ported into tests/conformance/client.py — and its own test
+  # vectors, transcribed into tests/vectors/.
+  "packages/fxa-auth-client/lib",
+  "packages/fxa-auth-client/test",
+  # quickStretch, scrypt, verifyHash/wrapwrapKey, and the *.spec.ts files that pin them.
+  "packages/fxa-auth-server/lib/crypto",
+  # tokenTypeID derivation and the single-use keyFetchToken bundle, likewise with their specs.
+  "packages/fxa-auth-server/lib/tokens",
+  # grant.js, jwt_access_token.js (incl. the oldsync `aud` swap), keys.ts, validators.js.
+  "packages/fxa-auth-server/lib/oauth",
+  # hawk-fxa-token.js: the auth scheme we match, MAC-discarding included.
+  "packages/fxa-auth-server/lib/routes/auth-schemes",
+  # The routes fxa-lite serves, and the shared response furniture around them.
+  "packages/fxa-auth-server/lib/routes/account.ts",
+  "packages/fxa-auth-server/lib/routes/session.js",
+  "packages/fxa-auth-server/lib/routes/devices-and-sessions.js",
+  "packages/fxa-auth-server/lib/routes/emails.js",
+  "packages/fxa-auth-server/lib/routes/oauth",
+  "packages/fxa-auth-server/lib/routes/defaults.js",
+  "packages/fxa-auth-server/lib/routes/util.js",
+  "packages/fxa-auth-server/lib/routes/validators.js",
+  "packages/fxa-auth-server/lib/devices.js",
+  # Where the three browser client ids, scopes and redirect URIs come from.
+  "packages/fxa-auth-server/config/dev.json",
+  # The errno table behind errors.py.
+  "libs/accounts/errors/src",
+  # Scoped keys, the oldsync special case, and the keys_jwe bundle — plus their specs.
+  "libs/vendored/crypto-relier/src/lib/deriver",
+  # ScopeSet, ported to oauth/scopes.py, and the KATs it is checked against.
+  "packages/fxa-shared/oauth/scopes.ts",
+  "packages/fxa-shared/test/oauth/scopes.js",
+  # The profile server: a second errno table and the /v1/{profile,email,uid,display_name} set.
+  "packages/fxa-profile-server/lib/error.js",
+  "packages/fxa-profile-server/lib/routes",
+  # WebChannel: command names and envelope, and two working emitters to copy structure from.
+  "packages/fxa-settings/src/lib/channels/firefox.ts",
+  "packages/fxa-settings/src/pages/Signin/utils.ts",
+  "packages/fxa-settings/src/pages/WebChannelExample/index.tsx",
+  "packages/functional-tests/pages/layout.ts",
+  # fx-sync-channel.js — the fields the browser side requires of a login message.
+  "packages/fxa-content-server/app/scripts/models/auth_brokers",
+  # The discovery document Firefox reads before anything else.
+  "packages/fxa-content-server/server/lib/routes/get-fxa-client-configuration.js",
+  # The about:config prefs phase 8 sets on a fresh profile.
+  "packages/fxa-dev-launcher/profile.mjs",
+]
+
+[[repo]]
+dir = "syncstorage-rs"
+url = "https://github.com/mozilla-services/syncstorage-rs"
+branch = "master"
+commit = "3f0f985cc92a72647a3a701da702a3d5f28d05df"
+date = "2026-08-21"
+took = "tokenlib, the tokenserver exchange, Sync 1.5 storage semantics, and the HAWK verification we do run"
+paths = [
+  # tokenlib: signing key, payload, token, derived secret.
+  "tokenserver-auth/src/token/native.rs",
+  "tokenserver-auth/src/crypto.rs",
+  # /1.0/sync/1.5 — extraction, the response body, and the tokenserver's error envelope.
+  "syncserver/src/tokenserver",
+  "tokenserver-common/src/error.rs",
+  # HAWK, whose module tests carry the worked example syncstorage/hawk.py is pinned against.
+  "syncserver/src/web/auth.rs",
+  # Query parameters, precondition headers, batch requests, and the endpoint set over them.
+  "syncserver/src/web/extractors",
+  "syncserver/src/web/handlers.rs",
+  # The bare-JSON-integer Weave error body, deliberate rather than an oversight.
+  "syncserver/src/error.rs",
+  # BSO and batch semantics, including the two upstream bugs we chose not to reproduce.
+  "syncstorage-mysql/src/db",
+  "syncstorage-db-common/src",
+  # The /info/configuration limits, fixed here rather than configurable.
+  "syncstorage-settings/src/lib.rs",
+]
+
+[[repo]]
+dir = "fxa-selfhosting"
+url = "https://github.com/jackyzy823/fxa-selfhosting"
+branch = "master"
+commit = "200626f1e59243536cfa9518e2168ac21b9e2bed"
+date = "2026-08-21"
+took = "what self-hosting the real thing costs, and the explicit client prefs for when autoconfig misbehaves"
+paths = [
+  "docker-compose.tmpl.yml",
+  "config.yml.sample",
+  "init.sh",
+]
+
+[[repo]]
+dir = "fxa-self-hosting"
+url = "https://github.com/michielbdejong/fxa-self-hosting"
+branch = "master"
+commit = "2343760c34197de7d7e6ec71118ce027a0e76e5a"
+date = "2016-05-13"
+took = "nothing — historical only, ten years stale, kept to show how long the problem has been unsolved"
+paths = [
+  "README.md",
+]
+
+[[repo]]
+dir = "python-jose"
+url = "https://github.com/mpdavis/python-jose"
+branch = "master"
+commit = "018b310ddb8b50dcfd09a0c152117835a21dd656"
+date = "2025-05-28"
+took = "nothing — evaluated at 3.5.0 and rejected; see plan.md, Decisions already made"
+paths = [
+  # ECDH-ES is in ALL but not SUPPORTED, and both directions gate on SUPPORTED.
+  "jose/jwe.py",
+  "jose/jws.py",
+  "jose/jwt.py",
+  # The pure-Python default backend, and the three dependencies that come with it.
+  "jose/backends",
+  "setup.py",
+  # 3.4.0 fixed CVE-2024-33663/33664; 3.5.0 is the last release.
+  "CHANGELOG.md",
+]

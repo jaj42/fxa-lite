@@ -15,6 +15,7 @@ started from a hand-made token would not prove it.
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -27,6 +28,7 @@ from conformance.client import (
     sync_key_id,
 )
 from conftest import EMAIL, PASSWORD
+from fxa_lite import syncstorage
 from fxa_lite.syncstorage.models import LIMITS
 
 
@@ -563,7 +565,7 @@ async def test_an_unknown_endpoint_under_storage_answers_in_sync_dialect(
 
 
 async def test_a_second_write_inside_the_same_hundredth_conflicts(
-    storage: SyncStorageClient,
+    storage: SyncStorageClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The rule the retry above exists for.
 
@@ -571,7 +573,23 @@ async def test_a_second_write_inside_the_same_hundredth_conflicts(
     already polled `?newer=` that instant would never see the second. Upstream
     answers with a 503 and a `Retry-After` rather than letting the write land
     where nobody will look for it.
+
+    The clock is frozen rather than raced: an in-process PUT takes a couple of
+    milliseconds, so two of them land in the same hundredth most of the time
+    but not all of it, and a test that asserts a conflict has to *cause* one.
     """
+
+    class Frozen:
+        """`time.time` as the storage app sees it, stopped mid-hundredth."""
+
+        instant = time.time()
+
+        @staticmethod
+        def time() -> float:
+            return Frozen.instant
+
+    monkeypatch.setattr(syncstorage, "time", Frozen)
+
     await _put(storage, "bookmarks", "abc", payload="first")
     response = await storage.put(
         "/storage/bookmarks/abc",

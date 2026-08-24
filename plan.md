@@ -71,6 +71,10 @@ sign/verify, and JWE compact ECDH-ES we implement ourselves** (~120 lines total)
 ```
 pyproject.toml            # uv-managed; [project.scripts] fxa-lite = "fxa_lite.cli:main"
 fxa.example.toml          # annotated config template; copy to fxa.toml (gitignored)
+UPSTREAM.toml             # what "the reference" is: per checkout, the commit read and the
+                          #   paths read from it — `resources/` itself is gitignored
+scripts/
+  upstream-diff.sh        # what upstream has done to those paths since we last looked
 src/fxa_lite/
   cli.py                  # `serve`, `account add|list|remove`, `keygen`
   config.py               # TOML -> dataclass; public_url, listen, jwks paths, token TTLs
@@ -94,6 +98,7 @@ tests/
   vectors/                # KATs transcribed from the reference *.spec.ts files,
                           #   plus signing-key.pem, the fixed RSA key behind the kid KAT
   conformance/client.py   # Python port of fxa-auth-client (crypto.ts + hawk.ts + bearer.ts)
+  test_upstream.py        # UPSTREAM.toml still describes the checkouts; skips without them
   test_*.py
 ```
 
@@ -561,7 +566,7 @@ As built:
   tokenserver → HAWK-signed PUT → read back, which is the test that fails if any two tiers
   disagree about what they hand each other. `ruff check` and `ty check` clean.
 
-### Phase 7 — pin the upstream commits
+### Phase 7 — pin the upstream commits ✅ done
 
 `resources/` is gitignored and untracked, so nothing in this repository records what "the
 reference" *is*. Every "verified against the reference" claim above, and every constant in
@@ -597,6 +602,44 @@ blocks phase 11, so it goes first.
 - A test asserting every path in `UPSTREAM.toml` exists in its checkout, skipped when `resources/`
   is absent. Upstream renames files; a stale path makes the diff *empty*, which reads as "nothing
   changed" — the one failure mode this file cannot survive.
+
+As built:
+
+- `UPSTREAM.toml` — five `[[repo]]` entries, fifty paths. Each entry is `dir` (the directory
+  under `resources/`), `url`, `branch`, the full 40-character `commit`, `date`, one line of
+  `took`, and `paths`. Branch is per repo and not an afterthought: only `mozilla/fxa` is on
+  `main`, the other four are still on `master`, so the `origin/main` in the sketch above would
+  have compared four of the five against nothing.
+- The path list is longer than the sketch because it is the list that was *read*, not the list
+  that was quoted. **Protocol constants** cites the files a constant came from; a route handler
+  matched by shape leaves no citation but is exactly as much of a dependency. So the routes
+  fxa-lite serves are listed alongside the crypto — `lib/routes/{account.ts,session.js,
+  devices-and-sessions.js,emails.js,oauth/}`, `lib/devices.js`, the profile server's routes and
+  its errno table, `config/dev.json` for the three browser clients, and
+  `fx-sync-channel.js` for the fields the browser end of the WebChannel requires.
+- `scripts/upstream-diff.sh` reads the manifest through `tomllib` rather than restating the
+  paths, since two copies of a path list is the same rot the file exists to prevent. Fetches by
+  default (a stale remote-tracking ref answers the wrong question), `--no-fetch` to work
+  offline, repo names to narrow. Exit 1 when an entry has commits to show so CI can ask; exit 2
+  when an entry cannot be read, including a repo name that matches no entry — silently logging
+  nothing is how a typo becomes "upstream is current".
+- `tests/test_upstream.py` — 26 tests, all skipping cleanly without `resources/`. Paths are
+  checked at **two** commits, because the two catch different things: at the pin, so the
+  manifest honestly describes the tree it was read from; and at `origin/<branch>`, which is the
+  check that matters. A rename shows up in the log exactly once, as the commit that renamed it,
+  and is invisible in every log taken after the pin is bumped past it — so the assertion has to
+  fire at the moment of the bump, which is the last moment it is cheap to fix.
+- Also checked: the pin resolves in the clone and its `%cs` matches the recorded date, `origin`
+  matches the recorded URL, no path is nested inside another listed path, and — the one that
+  closes the gap rather than guarding it — every checkout under `resources/` appears in the
+  manifest. A sixth clone somebody read from and did not record is precisely the provenance
+  hole this phase exists to fill.
+- Verified: 630 tests, `ruff check` and `ty check` clean, and `upstream-diff.sh` reports all
+  five entries current. One unrelated fix on the way past:
+  `test_a_second_write_inside_the_same_hundredth_conflicts` raced its own precondition — an
+  in-process PUT takes a couple of milliseconds, so two of them shared a hundredth most of the
+  time but not all of it, and the test failed about one run in three. It now freezes the
+  storage app's clock instead of hoping, because a test that asserts a conflict has to cause one.
 
 ### Phase 8 — real Firefox
 Fresh profile, `about:config`:
@@ -809,6 +852,9 @@ do both by half.
   `keys_jwe` client-side → assert the recovered oldsync key equals a direct derivation from `kB`.
 - Sync-tier test: that access token → tokenserver → HAWK-sign a BSO PUT → read it back.
 - `ruff check` + `ty check`.
+- `scripts/upstream-diff.sh` — not a pass/fail on the code, but the question the code cannot
+  ask itself: has upstream changed one of the files a constant was read from? Run it before
+  bumping a pin, and bump the pin only with the change or the note that answers its diff.
 - Manual: Phase 8, then `about:sync-log` and the Sync panel in `about:preferences#sync`.
 - CI runs the first four of these from phase 11 on; until then they are run by hand, and
   `tests/js/*.mjs` silently skip wherever `node` is missing.
