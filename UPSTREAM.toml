@@ -45,6 +45,9 @@ paths = [
   "packages/fxa-auth-server/lib/routes/devices-and-sessions.js",
   "packages/fxa-auth-server/lib/routes/emails.js",
   "packages/fxa-auth-server/lib/routes/oauth",
+  # attached_clients, plus the spec whose fixture is transcribed as its KAT.
+  "packages/fxa-auth-server/lib/routes/attached-clients.js",
+  "packages/fxa-auth-server/lib/routes/attached-clients.spec.ts",
   "packages/fxa-auth-server/lib/routes/defaults.js",
   "packages/fxa-auth-server/lib/routes/util.js",
   "packages/fxa-auth-server/lib/routes/validators.js",
@@ -58,6 +61,8 @@ paths = [
   # ScopeSet, ported to oauth/scopes.py, and the KATs it is checked against.
   "packages/fxa-shared/oauth/scopes.ts",
   "packages/fxa-shared/test/oauth/scopes.js",
+  # ConnectedServicesFactory: the merge behind /account/attached_clients.
+  "packages/fxa-shared/connected-services",
   # The profile server: a second errno table and the /v1/{profile,email,uid,display_name} set.
   "packages/fxa-profile-server/lib/error.js",
   "packages/fxa-profile-server/lib/routes",

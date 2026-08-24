@@ -53,12 +53,26 @@ def parse(user_agent: str) -> UserAgent:
     return UserAgent(browser=browser, browser_version=version, os=operating_system)
 
 
-def synthesize_name(user_agent: str) -> str:
+def synthesize(parsed: UserAgent) -> str:
     """`synthesizeClientName` — "Firefox 130, Linux", or as much of it as we know."""
-    parsed = parse(user_agent)
     parts = []
     if parsed.browser:
         parts.append(f"{parsed.browser} {parsed.browser_version}".strip())
     if parsed.os:
         parts.append(parsed.os)
     return ", ".join(parts)
+
+
+def synthesize_name(user_agent: str) -> str:
+    return synthesize(parse(user_agent))
+
+
+def describe(parsed: UserAgent) -> str:
+    """The `userAgent` field of an attached client: browser and major version.
+
+    Upstream splits `uaBrowserVersion` at the first dot here; `parse` has
+    already kept only the major, so there is nothing left to split.
+    """
+    if not parsed.browser:
+        return ""
+    return f"{parsed.browser} {parsed.browser_version}".strip()

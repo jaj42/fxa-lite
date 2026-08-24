@@ -764,21 +764,45 @@ three came from the trace rather than from reading — the `fxa-credentials` gra
 conflict, and the refresh-grant scope divergence — plus `tracing.py` and the README's
 *Pointing a browser at it* and *Debugging a client* sections.
 
+**`GET /v1/account/attached_clients` and its sibling are done.** `auth/attached_clients.py` is a
+transcription of `ConnectedServicesFactory`, keyed on the two pointers a device record carries —
+its `sessionTokenId` and its `refreshTokenId` — so one browser is one row rather than three. Notes:
+
+- The merge is a **pure function** taking the three lists, which is what lets the reference's own
+  fixture (`attached-clients.spec.ts`, "creates a merged list of all the things attached to the
+  account") be transcribed as a KAT: six rows, each field attributed to whichever of the three
+  sources upstream lets win. That fixture is the specification — the rules are all precedence
+  (a device names itself, a grant names an unnamed device, a session blanks the scope) and none
+  of them are derivable from the route's response schema.
+- **Access tokens cannot appear in the list.** Upstream enumerates them from a table and folds
+  each client holding one but no refresh token into a row of its own; here an access token is a
+  JWT with no server-side row, so there is nothing to enumerate. A client that holds only an
+  access token is invisible until it takes a refresh token or registers a device.
+- **A grant and a device are never merged here**, because `/account/device` is session-authed and
+  our device rows have no way to name a refresh token. A Sync sign-in is therefore two rows, not
+  one. The `refreshTokenId` column and the merge path for it are kept, since upstream's rule is
+  what a mobile client would need if that ever changes.
+- `createdTimeFormatted`/`lastAccessTimeFormatted` are `""` and `location` is `{}`: no localizer,
+  no geo-IP. The keys stay because `attachedClientsDefaults` has them, and their only consumer is
+  a settings UI fxa-lite does not serve.
+- `attached_oauth_clients` skips the factory rather than stubbing two of its three inputs out and
+  discarding thirteen of its fifteen fields, which is what upstream does.
+- `UPSTREAM.toml` gained `lib/routes/attached-clients.{js,spec.ts}` and
+  `packages/fxa-shared/connected-services`. 743 tests, `ruff check` and `ty check` clean.
+
 **Still to do, in the order that makes sense:**
 
-1. `GET /v1/account/attached_clients`, which Firefox polls throughout a session and which 404s
-   today. Not new protocol — the reference merges devices, sessions and authorized OAuth clients
-   into one flat list and every input already exists here. The sibling
-   `GET /v1/account/attached_oauth_clients` should land with it.
-2. `POST /v1/account/devices/notify`, called right after the clients collection is uploaded. Push
+1. `POST /v1/account/devices/notify`, called right after the clients collection is uploaded. Push
    and Send Tab are deliberately out of scope, so the question is what a server without them
    should *answer* — a 404 leaves Firefox retrying, and answering 200 to a notification that will
    never be delivered is a lie the client cannot detect. Establish which upstream considers
    correct before implementing either.
-3. Re-run the desktop pass on a **fresh profile** against a clean database. Everything above was
+2. Re-run the desktop pass on a **fresh profile** against a clean database. Everything above was
    observed on a profile that had already failed several sign-ins, so the happy path has been
-   seen in recovery, not from zero.
-4. The Fenix half, which has not been started and which needs TLS first (see the secure-context
+   seen in recovery, not from zero. This is also what confirms `attached_clients`: answering 200
+   is not the same as Firefox being satisfied with what is in the answer, and the trace is the
+   only place that shows the difference.
+3. The Fenix half, which has not been started and which needs TLS first (see the secure-context
    finding above). The four questions at the top of this phase remain open, and so does iOS.
 
 ### Phase 9 — harden `crypto/jose.py` ✅ done

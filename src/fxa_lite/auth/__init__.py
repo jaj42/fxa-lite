@@ -7,12 +7,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from . import account, devices, recovery_email, session, util
+from . import account, attached_clients, devices, recovery_email, session, util
 
 
 def router() -> APIRouter:
     api = APIRouter()
-    for module in (account, session, recovery_email, devices, util):
+    for module in (account, session, recovery_email, devices, attached_clients, util):
         api.include_router(module.router)
     return api
 

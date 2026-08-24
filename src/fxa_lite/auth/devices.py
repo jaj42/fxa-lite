@@ -63,21 +63,31 @@ def device_list(
 
     devices = []
     for device in db.devices(credentials.account.uid):
-        session = (
-            db.session_token(device.session_token_id) if device.session_token_id else None
-        )
-        last_access_time = session.last_access_time if session else device.created_at
-        if filterIdleDevicesTimestamp and last_access_time <= filterIdleDevicesTimestamp:
+        last_access = last_access_time(db, device)
+        if filterIdleDevicesTimestamp and last_access <= filterIdleDevicesTimestamp:
             continue
         devices.append(
             {
                 **_response(device),
                 "isCurrentDevice": device.session_token_id == credentials.token.token_id,
-                "lastAccessTime": last_access_time,
+                "lastAccessTime": last_access,
                 "location": {},
             }
         )
     return devices
+
+
+def last_access_time(db: Database, device: Device) -> int:
+    """When this device was last seen — which is when its session token was.
+
+    Upstream keeps `lastAccessTime` on the device row and refreshes it from the
+    session token cache (`mergeDeviceAndSessionToken`). There is no cache here,
+    so the session token is simply read; a device whose session is gone falls
+    back to its own creation time, which is the last moment it was certainly
+    there.
+    """
+    session = db.session_token(device.session_token_id) if device.session_token_id else None
+    return session.last_access_time if session else device.created_at
 
 
 @router.post("/account/device/destroy")

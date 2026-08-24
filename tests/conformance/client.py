@@ -484,6 +484,19 @@ class AuthClient:
             "POST", "/account/device/destroy", session_token, "sessionToken", {"id": device_id}
         )
 
+    async def attached_clients(
+        self, session_token: str, *, filter_idle_devices_timestamp: int | None = None
+    ) -> Any:
+        path = "/account/attached_clients"
+        if filter_idle_devices_timestamp is not None:
+            path += f"?filterIdleDevicesTimestamp={filter_idle_devices_timestamp}"
+        return await self.authed("GET", path, session_token, "sessionToken")
+
+    async def attached_oauth_clients(self, session_token: str) -> Any:
+        return await self.authed(
+            "GET", "/account/attached_oauth_clients", session_token, "sessionToken"
+        )
+
     # -- oauth ----------------------------------------------------------------
 
     async def oauth_authorization(self, session_token: str, **payload: Any) -> Any:
