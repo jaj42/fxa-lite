@@ -4,7 +4,10 @@ A slim, self-hosted Mozilla Accounts + Sync stack in Python: one process, one
 SQLite file, no external services — wire-compatible enough that a stock Firefox
 Desktop pointed at it via `identity.fxaccounts.autoconfig.uri` signs in and syncs.
 
-See [plan.md](plan.md) for the design and the phase breakdown.
+**Documentation: <https://jaj42.github.io/fxa-lite/>** — running it, pointing
+each browser at it, the architecture, the message flows, and the list of every
+place this deliberately behaves unlike the reference. See
+[plan.md](plan.md) for the design and the phase breakdown.
 
 ## Status
 
@@ -27,6 +30,14 @@ Phase 11 shipped the container deliverables — `Dockerfile`, `docker-compose.ya
 with an opt-in `tls` profile, `deploy/nginx.conf.example` and a smoke script that
 drives the whole bootstrap against a built image.
 
+Phase 12 shipped CI and the documentation: `.github/workflows/ci.yml` runs
+`pytest`, `ruff check`, `ty check`, a `sphinx-build -W` and a build of the image
+on every push and pull request — so "clean at the end of the phase" is a
+recorded fact rather than a claim — and `docs/` is a Sphinx site published to
+GitHub Pages. Two of its chapters are generated rather than written: the
+provenance list from `UPSTREAM.toml`, and the divergence list from
+`# DIVERGENCE:` markers at the code that does the diverging.
+
 Phase 8 is done: **Firefox Desktop and Firefox for Android both sign in and sync
 against it for real** — tokenserver, `meta/global`, `crypto/keys`, and uploads of
 clients, prefs, tabs, bookmarks, addons and history. Everything in *Pointing a
@@ -39,12 +50,14 @@ needs TLS before any of it, because the sign-in page needs a secure context
 
 ## Usage
 
+<!-- include: quickstart -->
 ```sh
 cp fxa.example.toml fxa.toml            # edit public_url to taste
 uv run fxa-lite keygen                  # writes paths.signing_key (RSA-2048, RS256)
 uv run fxa-lite account add you@example.com
 uv run fxa-lite serve
 ```
+<!-- end: quickstart -->
 
 There is no signup page and there will not be one: accounts are provisioned
 from the command line on the machine holding the database.
@@ -60,6 +73,7 @@ The machine a household runs this on is usually a NAS or a small always-on box,
 where the unit of deployment is a container. The image makes the same promise as
 the CLI — one process, one file of state:
 
+<!-- include: docker-quickstart -->
 ```sh
 docker compose run --rm --interactive fxa-lite \
     sh -c 'cat > /data/fxa.toml' < fxa.example.toml   # edit public_url first
@@ -67,6 +81,7 @@ docker compose run --rm fxa-lite keygen
 docker compose run --rm -it fxa-lite account add you@example.com
 docker compose up -d
 ```
+<!-- end: docker-quickstart -->
 
 Everything lives in one volume mounted at `/data`: `fxa.toml`, `fxa.sqlite` and
 `signing-key.json`, found through `FXA_LITE_CONFIG=/data/fxa.toml` because
@@ -112,11 +127,13 @@ need. Below it is `https://fxa.example.com`.
 
 **Firefox Desktop** — a fresh profile, `about:config`:
 
+<!-- include: desktop-prefs -->
 | Pref | Value |
 |---|---|
 | `identity.fxaccounts.autoconfig.uri` | `https://fxa.example.com` |
 | `webchannel.allowObject.urlWhitelist` | `https://fxa.example.com` (origin, no trailing slash) |
 | `identity.fxaccounts.allowHttp` | `true` — only when serving plain HTTP |
+<!-- end: desktop-prefs -->
 
 The first pref is enough on its own: Firefox reads
 `/.well-known/fxa-client-configuration` from that origin and finds the accounts,
@@ -139,10 +156,12 @@ Two things that will otherwise cost you an evening:
 **Firefox for Android** — Settings → About Firefox → tap the logo five times to
 unlock the secret menu, then Settings → **Sync Debug**:
 
+<!-- include: android-fields -->
 | Field | Value |
 |---|---|
 | Custom Mozilla account server | `https://fxa.example.com` |
 | Custom Sync server | `https://fxa.example.com/token/1.0/sync/1.5` |
+<!-- end: android-fields -->
 
 (Older builds call the first one *Custom Firefox Account server*.) The two are
 not the same shape, which is the thing that catches people out: the account
@@ -254,4 +273,17 @@ uv run ty check
 The sign-in page's JavaScript is exercised under `node`, which is the only way
 to reach it: `tests/test_content_crypto.py` runs it against the same
 known-answer vectors as the Python crypto, and `tests/test_content_flow.py`
-drives the whole flow against a real server. Both skip if `node` is missing.
+drives the whole flow against a real server. Both skip if `node` is missing —
+except when `CI` is set, where they fail instead. They are the only coverage of
+the browser-side crypto, and a green run that skipped them looks exactly like a
+green run that did not.
+
+The documentation builds with:
+
+```sh
+uv run sphinx-build -W -b html docs docs/_build/html
+```
+
+`-W` because two of its chapters are generated from the tree — a
+`# DIVERGENCE:` marker that has lost a field, or a path in `UPSTREAM.toml` that
+upstream has renamed, should fail the build rather than publish a gap.

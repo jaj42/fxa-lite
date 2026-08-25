@@ -136,6 +136,17 @@ def payload_hash(body: bytes, content_type: str) -> str:
     return base64.b64encode(hashlib.sha256(prefix + body + b"\n").digest()).decode("ascii")
 
 
+# DIVERGENCE: hawk-payload-hash-verified — a `hash=` the client sent is checked
+#   upstream: neither the Rust server nor the Python one before it verifies the
+#     payload hash, so a body is covered only by whatever the client claimed.
+#   fxa-lite: when `hash` is present it must equal
+#     base64(SHA-256("hawk.1.payload\n<content-type>\n<body>\n")).
+#   why: a correct HAWK client computes it correctly by definition, so checking
+#     costs nothing, and it is the only thing that binds the body to the MAC.
+#   cost: none for a real client. A request that omits `hash` is still accepted
+#     with an unauthenticated body — the specification's own answer, and what
+#     shipping clients rely on. `hash` cannot be stripped to gain anything,
+#     because it is a field inside the normalized string.
 def verify(
     header: HawkHeader,
     key: str,

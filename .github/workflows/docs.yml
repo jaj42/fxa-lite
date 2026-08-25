@@ -1,0 +1,59 @@
+# Build the Sphinx site, and publish it from `main`.
+#
+# Pages has to be enabled on the repository with "GitHub Actions" as the source.
+# That is a one-time manual step in Settings → Pages that no workflow can do for
+# you; until it is done this job builds and then fails at `deploy-pages`.
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --locked
+
+      # `-W`: a broken cross-reference fails the build instead of shipping as a
+      # dead link. Two chapters here are generated from the source tree at build
+      # time — the divergence list from the `# DIVERGENCE:` markers, the
+      # provenance list from `UPSTREAM.toml` — so this also fails when a marker
+      # loses a field or a pinned path is renamed.
+      - name: Build
+        run: uv run sphinx-build -W -b html docs docs/_build/html
+
+      - uses: actions/configure-pages@v5
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      - uses: actions/upload-pages-artifact@v3
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        with:
+          path: docs/_build/html
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

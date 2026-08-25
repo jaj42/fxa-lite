@@ -16,7 +16,6 @@ and opened in Python, which is the only way to know the two agree about the
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -24,6 +23,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from fxa_lite.crypto import jose
+from nodejs import require_node
 from vectors import load
 
 DRIVER = Path(__file__).parent / "js" / "crypto_kat.mjs"
@@ -48,9 +48,7 @@ def recipient() -> ec.EllipticCurvePrivateKey:
 @pytest.fixture(scope="module")
 def results(recipient: ec.EllipticCurvePrivateKey) -> dict:
     """Run every vector through node once; the tests below just read the answers."""
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is not installed, so the browser crypto cannot be exercised")
+    node = require_node("the browser crypto cannot be exercised")
 
     onepw = load("onepw")
     tokens = load("tokens")

@@ -276,6 +276,17 @@ async def info_collection_usage(uid: int, request: Request) -> Response:
     return _run(sync, handler)
 
 
+# DIVERGENCE: quota-advertised-not-enforced — the limit is a number, not a rule
+#   upstream: enforces `max_total_bytes` per user and answers `/info/quota` with
+#     the usage and the limit.
+#   fxa-lite: `/info/configuration` advertises the limits Firefox needs in order
+#     to size its batches, `/info/quota` reports usage with a null limit, and
+#     nothing is refused for being too much in total.
+#   why: a household's disk is the quota. A per-account number here would be a
+#     promise about a shared filesystem this tier cannot keep.
+#   cost: a signed-in account can fill the disk. Accepted in AUDIT.md, and in
+#     the README's Security section, on the grounds that watching the disk is
+#     something the operator of a NAS does anyway.
 @router.get(f"/{VERSION}/{{uid:int}}/info/quota")
 async def info_quota(uid: int, request: Request) -> Response:
     """`[used_kb, limit_kb]`. The limit is null because fxa-lite enforces none.

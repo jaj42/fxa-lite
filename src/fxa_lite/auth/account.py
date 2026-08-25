@@ -27,6 +27,17 @@ from .models import (
 router = APIRouter(tags=["account"])
 
 
+# DIVERGENCE: registration-closed — `/account/create` is off by default
+#   upstream: open. It is the signup funnel, in front of email verification,
+#     the customs server and a rate limiter.
+#   fxa-lite: 403 / errno 202 unless `[security] open_registration` is set;
+#     accounts come from `fxa-lite account add` on the machine holding the file.
+#   why: wire-compatible meant reachable by anyone who can reach the origin, and
+#     each attempt is one unauthenticated scrypt — 64 MiB and ~100 ms of a
+#     household NAS — with an attacker-chosen address and an account at the end.
+#     No page in `content/assets/` calls it, so the gate costs no real client.
+#   cost: the reference client's own signup flow needs the switch turned on.
+#     The test suite turns it on for exactly that reason.
 @router.post("/account/create")
 def account_create(
     payload: AccountCreate,
@@ -182,6 +193,17 @@ def account_destroy(
     return {}
 
 
+# DIVERGENCE: no-v2-upgrade — `upgradeNeeded` is always false
+#   upstream: reports `upgradeNeeded: true` for an account with no v2
+#     (quickStretchV2) verifier, which asks the client to run a password change.
+#   fxa-lite: always `{"currentVersion": "v1", "upgradeNeeded": false}`.
+#   why: the client can only complete that upgrade against a server that speaks
+#     v2 credentials. This one does not, so promising the upgrade strands the
+#     client mid-flow.
+#   cost: accounts stay on v1 key stretching — 1000 PBKDF2 iterations against
+#     the email as salt, rather than 650 000 against a random one. The password
+#     never leaves the browser either way; what v2 buys is resistance to
+#     offline attack on a stolen `authPW`, which this deployment does not store.
 @router.post("/account/credentials/status")
 def credentials_status(payload: CredentialsStatus, request: Request) -> dict[str, Any]:
     """Which key-stretching version this account uses.

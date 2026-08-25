@@ -156,6 +156,17 @@ def _auth_data(request: Request) -> AuthData:
     )
 
 
+# DIVERGENCE: tokenserver-audience-checked — `aud` is verified here
+#   upstream: skips the check; its own comment says the ecosystem does not
+#     request the right audience, so enforcing it would reject valid tokens.
+#   fxa-lite: requires `aud` to be this deployment's own tokenserver URL.
+#   why: `oauth/grant.py` is the only thing that mints that audience and mints
+#     it only for the oldsync scope, so the check holds for every token that can
+#     exist here. It is what stops a token issued to some other relier being
+#     spent for Sync.
+#   cost: nothing a client can trip. It does bind the tokenserver to
+#     `public_url`: move the origin and outstanding access tokens stop being
+#     spendable here, for at most `ttl.access_token`.
 def _verified_access_token(request: Request) -> dict[str, Any]:
     """Verify the access token against our own signing key.
 

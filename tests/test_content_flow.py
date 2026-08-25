@@ -16,7 +16,6 @@ not the rendering.
 from __future__ import annotations
 
 import json
-import shutil
 import socket
 import subprocess
 import threading
@@ -46,6 +45,7 @@ from fxa_lite.config import from_dict
 from fxa_lite.crypto import jose
 from fxa_lite.db import open_database
 from fxa_lite.oauth.keys import SigningKeys
+from nodejs import require_node
 
 HARNESS = Path(__file__).parent / "js" / "signin_harness.mjs"
 
@@ -58,10 +58,7 @@ BROWSER_ENGINES = ["bookmarks", "history", "passwords", "tabs", "creditcards"]
 
 @pytest.fixture(scope="module")
 def node() -> str:
-    found = shutil.which("node")
-    if found is None:
-        pytest.skip("node is not installed, so the sign-in page cannot be driven")
-    return found
+    return require_node("the sign-in page cannot be driven")
 
 
 @pytest.fixture(scope="module")

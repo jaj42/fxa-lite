@@ -91,6 +91,20 @@ def provision_with_password(
     return account
 
 
+# DIVERGENCE: failed-login-throttle — what is left of the customs server
+#   upstream: a separate service (fxa-customs-server) rate-limits by IP, email
+#     and action, with block lists and unblock codes behind it.
+#   fxa-lite: one in-process counter of *failed* password checks per normalized
+#     email, consulted between the account lookup and scrypt; ten in five
+#     minutes, then 429 / errno 114 with `retryAfter` and `Retry-After`.
+#   why: scrypt at N=65536 is a denial-of-service amplifier before it is a
+#     guessing surface. Counting failures rather than requests is what makes it
+#     safe to ship on by default — an attacker cannot lock a household out of
+#     its own accounts, because a correct password clears the tally.
+#   cost: it does not limit by IP, because behind a reverse proxy every client
+#     is 127.0.0.1; that half is the proxy's job and ships uncommented in
+#     `deploy/nginx.conf.example`. It closes no account-existence oracle and is
+#     not meant to.
 def authenticate(
     db: Database,
     *,

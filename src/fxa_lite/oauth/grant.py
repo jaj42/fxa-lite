@@ -118,6 +118,18 @@ class Grant:
         return self.client.id
 
 
+# DIVERGENCE: strict-scope-validation — an unregistered scope is dropped, not granted
+#   upstream: `strictScopeValidation` is off by default, so a trusted client
+#     asking for a scope outside its own allow-list is simply granted it
+#     (`lib/oauth/grant.js`).
+#   fxa-lite: on. The scope is dropped, and a request every one of whose scopes
+#     was dropped is refused rather than answered with an empty grant.
+#   why: upstream's default is tolerable while an admin panel curates the client
+#     table. Here that table is a config file edited by hand, so the registered
+#     allow-list has to be the whole answer.
+#   cost: a `[[clients]]` entry with an incomplete `allowed_scopes` gets a
+#     narrower grant than it asked for instead of working. `test_security.py`
+#     pins that a dropped scope cannot reappear on the refresh path.
 def validate_requested_grant(
     claims: SessionClaims, client: Client, request: GrantRequest
 ) -> Grant:

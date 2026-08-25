@@ -1450,7 +1450,7 @@ becomes instructions.
   checked to carry linux/arm64, but this machine runs podman without a buildx equivalent, and an
   emulated arm64 build proves less than phase 12's CI will.
 
-### Phase 12 — documentation and CI
+### Phase 12 — documentation and CI ✅ done
 
 Sphinx under `docs/`, published to GitHub Pages by `.github/workflows/`. There is no CI at all
 today: "`ruff check` and `ty check` clean" at the end of every phase is a claim a human made six
@@ -1527,6 +1527,84 @@ Last: once the docs carry the architecture and the flows, `plan.md` stops being 
 they exist. Decide then whether the plan stays as a build log or is retired into the docs. Do not
 do both by half.
 
+As built:
+
+- **CI first, as the phase said.** `.github/workflows/ci.yml` runs `uv sync --locked`, `pytest`,
+  `ruff check`, `ty check` and a `sphinx-build -W` in one job, and builds the phase-11 image in
+  another. `--locked` rather than `--frozen`, so a `uv.lock` that has drifted from
+  `pyproject.toml` fails here instead of resolving differently in CI than on the machine that
+  wrote the change. The image job is build-only: there is no registry, and what it catches is
+  what `tests/test_docker.py` structurally cannot — a withdrawn base digest, a `uv sync` that no
+  longer resolves inside the builder stage, a `COPY` of a path that moved.
+- **The node question is answered by failing, not by counting.** `tests/nodejs.py` is one
+  function: `shutil.which("node")`, then skip — unless `CI` is set, in which case `pytest.fail`
+  with the reason and the remedy. Asserting a collected count was the alternative and it is
+  worse: it goes stale every time a test is added, and it fails with a number rather than with
+  "your runner has no JavaScript runtime and these are the only coverage of the browser crypto".
+  Verified both directions with `node` off `PATH` — 19 errors with `CI=true`, 19 skips without.
+- **The divergence chapter is generated, and that was the whole argument of the phase.** Twenty
+  `# DIVERGENCE:` markers now sit at the code that diverges, each carrying four fields —
+  `upstream`, `fxa-lite`, `why`, `cost`. `docs/_ext/divergence_scan.py` is a stdlib-only parser;
+  `docs/_ext/divergences.py` is the Sphinx directive that renders them as cross-reference targets,
+  so `running.md` and `architecture.md` link *into* the list rather than restating it. There is
+  no authored copy. The plan offered "markers and generate" or "author and assert agreement", and
+  the second is the one that rots: two texts, one test, and the test can only ever check that the
+  slugs match, never that the prose still describes the code.
+- **`tests/test_divergences.py` guards the failure mode generation introduces**, which is that a
+  divergence now vanishes from the docs by having its comment deleted — exactly what a refactor
+  does to a comment it does not understand. The phase-10 list is pinned by slug in *both*
+  directions: a marker that disappears fails, and a marker added without being listed fails too,
+  because the point of the list is that somebody decided each entry was worth publishing.
+- **`UPSTREAM.toml` is rendered by reading it twice.** `tomllib` gives the data and throws the
+  comments away, and the comments are most of the value — a path says a directory was opened,
+  while "hawk-fxa-token.js: the auth scheme we match, MAC-discarding included" says what was
+  found there. So `docs/_ext/upstream.py` scans the raw text a second time for the note above
+  each path and matches the two halves up.
+- **The README is the single source for the parts a reader meets first.** Four blocks are fenced
+  with `<!-- include: … -->` — the quickstart, the docker bootstrap, the desktop prefs, the Fenix
+  fields — and the docs pull them in with MyST `include`. The direction matters: GitHub renders
+  no includes, so the README has to hold the literal text and the docs have to be the ones
+  quoting it. `tests/test_docs.py` pins the markers, that each is quoted somewhere, that none has
+  gone empty, and that every page is in the toctree.
+- **Six pages.** *Running it* walks `fxa.example.toml` key by key and lands phase 10's
+  operator-dependent findings as instructions — TLS at exactly `public_url`, the proxy's
+  `limit_req_zone`, the key's mode — plus what a rotation costs and what each of the four
+  possible losses costs. *Pointing a browser at it* is the client table derived from `public_url`
+  and nothing else. *Architecture* is the prefix table, the six tiers, the schema table by table
+  and the three envelopes with the reason there are three. *Message flows* is the three mermaid
+  sequence diagrams, with phase 4's two ordering rules marked on the first one. *Provenance and
+  divergences* is the two generated chapters. *The crypto core* is `autodoc` over
+  `fxa_lite.crypto`.
+- **`-W` earned its place immediately.** MyST resolves `[](page.md#anchor)` only against *heading*
+  slugs, so the eleven links into the generated list were dead on the first build and said so.
+  They are `{ref}` roles now, against targets the directive registers on each entry's rubric —
+  which also means Sphinx supplies the divergence's own title as the link text.
+- **The docs group is a default group**, not an optional one. Nothing under `src/` imports any of
+  it and `uv build` ships none of it — there is a test for the first half — but `docs/_ext/` is
+  first-party Python that `ruff` and `ty` read like any other file, and an extension excluded
+  from both is an extension that breaks on the day nobody is watching. `ty` needed
+  `extra-paths = ["docs/_ext"]` to see it at all.
+- 909 tests (was 838), `ruff check` and `ty check` clean, `sphinx-build -W` clean.
+
+**What this phase did not establish.** Phase 8's four questions were inherited here as work, and
+three of them are still work: whether Fenix's *Custom Sync server* field is needed at all given
+that discovery advertises `sync_tokenserver_base_url`, what the two fields do to an
+already-signed-in profile, and whether *Use New React Mozilla Account page* opens a path outside
+`content/__init__.py:PAGE_PATHS`. Each is one session with a handset and none of them is a
+reading of the source. The fourth — whether a shipping Firefox for iOS can be pointed at a custom
+server — is unknown and may end in "it cannot", which is the answer worth printing. `docs/clients.md`
+records all four as open in the place a person would look for them, rather than guessing; that is
+the honest state, not a substitute for the answer.
+
+**The plan stays, as a build log.** The architecture, the flows and the divergences now live in
+`docs/`, and this file should not be the second copy of any of them — it already links nowhere
+and is written in the past tense of decisions rather than in the present tense of behaviour. What
+it keeps being is the record of *why each phase was attempted in the order it was*, including the
+four things that turned out to be wrong, which is not documentation and does not belong on a
+published site. So: no retirement, no migration, and no new architecture prose here. A future
+phase describes what it did; when that changes how the thing behaves, the change lands in `docs/`
+in the same commit.
+
 ---
 
 ## Verification
@@ -1543,8 +1621,11 @@ do both by half.
   ask itself: has upstream changed one of the files a constant was read from? Run it before
   bumping a pin, and bump the pin only with the change or the note that answers its diff.
 - Manual: Phase 8, then `about:sync-log` and the Sync panel in `about:preferences#sync`.
-- CI runs the first four of these from phase 12 on; until then they are run by hand, and
-  `tests/js/*.mjs` silently skip wherever `node` is missing.
+- CI runs the first four of these on every push and pull request
+  (`.github/workflows/ci.yml`), together with `sphinx-build -W` and a build of the image.
+  `tests/js/*.mjs` no longer skip silently there: `tests/nodejs.py` fails when `CI` is set and
+  `node` is absent, because they are the only coverage of the browser-side crypto and a run that
+  skipped them looks exactly like a run that did not.
 
 ## Deliberately out of scope
 

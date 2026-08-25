@@ -97,6 +97,16 @@ Credentials = Annotated[TokenCredentials, Depends(oauth_credentials)]
 router = APIRouter(tags=["profile"])
 
 
+# DIVERGENCE: metrics-disabled — `metricsEnabled` is always false
+#   upstream: reflects the user's telemetry preference, and the settings SPA
+#     lets them change it.
+#   fxa-lite: hard `false`, here and in `/account/login`, `/account/create` and
+#     `/session/status`.
+#   why: there is no metrics pipeline to opt into — no Glean, no Sentry, no
+#     Amplitude — so the only truthful value is the one that says so. A field
+#     Firefox reads cannot simply be omitted.
+#   cost: none on the wire. It does mean the value is not a preference a user
+#     can set; the answer to "may this server collect telemetry" is no.
 @router.get("/profile")
 def profile(credentials: Credentials) -> dict[str, Any]:
     """Everything the token's scopes allow, in one document.

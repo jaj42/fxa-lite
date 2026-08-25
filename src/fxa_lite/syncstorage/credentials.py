@@ -119,6 +119,15 @@ def _credentials(claims: dict[str, Any]) -> SyncCredentials:
     )
 
 
+# DIVERGENCE: hawk-signs-decoded-path — the MAC covers the decoded request target
+#   upstream: syncstorage-rs signs the raw target, percent-escapes intact.
+#   fxa-lite: signs `request.url.path`, which Starlette has already decoded.
+#   why: not a decision so much as what the ASGI scope hands over; the same
+#     decoded string is what routing reads, so the MAC and the dispatch cannot
+#     disagree and nothing can be smuggled between them.
+#   cost: a BSO id containing `%`, a space or `#` would fail verification.
+#     Sync ids are GUIDs and base64url, so no shipping client has one — an
+#     interop edge, recorded in AUDIT.md under "noted, not fixed".
 def authenticate(
     *,
     header: str | None,

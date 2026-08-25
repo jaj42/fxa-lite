@@ -192,6 +192,19 @@ def too_many_requests(retry_after: int) -> FxaError:
     )
 
 
+# DIVERGENCE: no-retry-after-on-permanent-403 — errno 202 carries no `retryAfter`
+#   upstream: `AppError.featureNotEnabled` defaults `retryAfter` to 30 and sets
+#     a `Retry-After` header with it.
+#   fxa-lite: both absent unless a caller asks for them, and no caller does.
+#   why: Firefox's `FxAccountsClient._request` caches a `retryAfter` from any
+#     error body as `backoffError` and then rejects *every* FxA request for that
+#     long, refreshed on each retry. On an answer that will never change, that
+#     stalls the whole account client on a timer. Upstream can afford the
+#     default because its switch is temporary; these features are off by
+#     construction.
+#   cost: a client polling a permanently-disabled feature is not told to slow
+#     down, so it polls at its own interval. That is two requests a minute for
+#     one route, against stalling sign-in.
 def feature_not_enabled(retry_after: int | None = None) -> FxaError:
     """403 for a feature this deployment does not run.
 

@@ -1,0 +1,37 @@
+/* The generated chapters, which are the only pages with structure Sphinx does
+   not already style: a divergence is four labelled paragraphs that have to read
+   as one unit, and an upstream entry is a long list of paths that has to read
+   as a reference rather than as prose. */
+
+.divergence {
+    border-left: 3px solid var(--color-background-border);
+    padding-left: 1rem;
+    margin-bottom: 1.75rem;
+}
+
+.divergence > .rubric {
+    margin-top: 0;
+    font-size: 1.05rem;
+}
+
+.divergence-field {
+    margin: 0.35rem 0;
+}
+
+.divergence-source,
+.divergence-source code {
+    font-size: 0.8rem;
+    color: var(--color-foreground-secondary);
+}
+
+.rubric.divergence-tier,
+.rubric.upstream-repo {
+    font-size: 1.3rem;
+    margin-top: 2.5rem;
+    border-bottom: 1px solid var(--color-background-border);
+    padding-bottom: 0.3rem;
+}
+
+ul.upstream-paths {
+    font-size: 0.9rem;
+}

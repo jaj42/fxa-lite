@@ -131,6 +131,16 @@ CREATE TABLE refresh_tokens (
 CREATE INDEX refresh_tokens_uid ON refresh_tokens(uid);
 """
 
+# DIVERGENCE: sync-users-real-foreign-key — Sync users reference the accounts table
+#   upstream: the tokenserver is its own deployment with its own database and
+#     has never seen the accounts table, so it keys users on the string
+#     `<fxa_uid>@<email domain>` and can only ever expire a row.
+#   fxa-lite: `sync_users.fxa_uid` is a real foreign key with ON DELETE CASCADE.
+#   why: the two tiers are one SQLite file here. Making the relationship real is
+#     what lets `fxa-lite account remove` take the account's Sync storage with
+#     it instead of orphaning it.
+#   cost: the two tiers can no longer be separated without a migration, which is
+#     a promise this project makes everywhere else too.
 SCHEMA_V2 = """
 -- Phase 5: the Sync tokenserver's user table.
 --

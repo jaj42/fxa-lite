@@ -91,6 +91,18 @@ class DeviceCredentials:
         return self.refresh.token_id if self.refresh else None
 
 
+# DIVERGENCE: hawk-macs-unverified — the accounts API discards the HAWK MAC
+#   upstream: parses `Hawk id="…"` and throws `mac`, `ts` and `nonce` away
+#     (`lib/routes/auth-schemes/hawk-fxa-token.js`). The departure here is from
+#     the HAWK specification, not from the reference server.
+#   fxa-lite: the same, deliberately. The token id is the credential under both
+#     `Hawk` and `Bearer fxs_…`, and neither header grants more than the other.
+#   why: a server that verified MACs the reference does not would refuse clients
+#     the reference accepts — the one failure this project cannot afford — and
+#     the id is 32 bytes of CSPRNG output either way.
+#   cost: a captured Authorization header is spendable until the session is
+#     destroyed, which is one of the reasons TLS is required rather than advised.
+#     Sync *storage* HAWK is a different protocol and is fully verified.
 def token_id(header: str | None, token_type: TokenType) -> str | None:
     """Extract the token id from an Authorization header, or None if there isn't one.
 

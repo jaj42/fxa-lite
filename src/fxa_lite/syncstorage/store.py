@@ -544,6 +544,16 @@ class SyncStore:
         self._erect_tombstone()
         return self.storage_timestamp()
 
+    # DIVERGENCE: wipe-clears-open-batches — a storage wipe takes staged uploads with it
+    #   upstream: leaves `batches`/`batch_uploads` rows behind, so a client that
+    #     wipes and then commits a batch id it opened beforehand resurrects the
+    #     records the wipe was meant to remove.
+    #   fxa-lite: the wipe deletes the account's open batches and their items.
+    #   why: "delete everything" that leaves a resurrection path behind is not
+    #     the answer the route's name promises, and Firefox wipes storage exactly
+    #     when it has decided the old records must not come back.
+    #   cost: a commit of a batch opened before a wipe answers "batch not found"
+    #     rather than landing. That is the intended answer.
     def delete_storage(self) -> None:
         """Everything, including the tombstone: the account starts over at zero."""
         self.connection.execute("DELETE FROM sync_bso WHERE uid = ?", (self.uid,))
@@ -629,6 +639,15 @@ class SyncStore:
         ).fetchone()
         return row is not None
 
+    # DIVERGENCE: batch-append-filters-id — a restaged record replaces only itself
+    #   upstream: `do_append` updates the staged row without filtering on its id,
+    #     so re-sending one record in a batch rewrites every record already staged.
+    #   fxa-lite: the upsert is keyed on `(uid, batch_id, id)`, so a repeat
+    #     replaces itself and nothing else — and replaces its `sortindex` too.
+    #   why: it is a bug, it silently corrupts exactly the large uploads batching
+    #     exists for, and reproducing it would mean writing the corruption twice.
+    #   cost: a client relying on the upstream behaviour would be relying on data
+    #     loss. None does; Firefox stages disjoint records.
     def append_to_batch(self, collection: str, batch: str, bsos: Sequence[Any]) -> None:
         """Stage records against an open batch.
 

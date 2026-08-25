@@ -118,6 +118,18 @@ def last_access_time(db: Database, device: Device) -> int:
     return device.created_at
 
 
+# DIVERGENCE: device-commands-not-enabled — the command queue answers 403/errno 202
+#   upstream: reads the queue with `pushbox.retrieve` and returns the pending
+#     messages; with `config.pushbox.enabled = false` every pushbox method
+#     rejects with `featureNotEnabled`, which is 403 / errno 202.
+#   fxa-lite: always the latter. There is no pushbox and no `invoke_command`.
+#   why: the queue is not empty, it does not exist. An empty-queue 200 is the
+#     answer that never changes: it spends the client's polls telling it to ask
+#     again instead of telling it why. errno 202 is in the client's own error
+#     table; errno 116 (unknown endpoint) is not an answer about this feature.
+#   cost: Send Tab and the other device commands do not work, which is the
+#     out-of-scope list stated in the protocol's own words. `retryAfter` is
+#     deliberately absent — see `errors.feature_not_enabled`.
 @router.get("/account/device/commands")
 def device_commands(
     request: Request,
@@ -182,6 +194,16 @@ def device_destroy(
     return {}
 
 
+# DIVERGENCE: devices-notify-not-enabled — the push fan-out answers 403/errno 202
+#   upstream: pushes the notification to the named devices; the same 403 / errno
+#     202 when `deviceNotificationsEnabled` is off, a switch documented there as
+#     temporary, for when client logic overloads the server.
+#   fxa-lite: permanently that answer. There is no push service.
+#   why: a 200 would promise a delivery that cannot happen, and Firefox treats
+#     the promise as kept.
+#   cost: a Sync write does not nudge the other devices, so they pick it up on
+#     their next poll instead of at once. Again with no `retryAfter`: a
+#     permanent 403 that carries one stalls the whole account client on a timer.
 @router.post("/account/devices/notify")
 def devices_notify(payload: DevicesNotify, credentials: DeviceAuth) -> dict[str, Any]:
     """Firefox's "the clients collection changed" nudge — answered 403/202.

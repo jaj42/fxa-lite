@@ -29,6 +29,28 @@ dev = [
     "ruff>=0.16.4",
     "ty>=0.0.74",
 ]
+# Never a runtime dependency: nothing under `src/` imports any of these, and
+# `uv build` ships none of them. They are a default group all the same, because
+# `docs/_ext/` is first-party Python that `ruff check` and `ty check` read like
+# any other file — a docs extension excluded from both is a docs extension that
+# breaks on the day nobody is watching.
+docs = [
+    "furo>=2024.8.6",
+    "myst-parser>=4.0",
+    "sphinx>=8.1",
+    "sphinxcontrib-mermaid>=1.0.0",
+    "types-docutils>=0.21",
+]
+
+[tool.uv]
+default-groups = ["dev", "docs"]
+
+[tool.ty.environment]
+# `docs/_ext` is on `sys.path` for Sphinx (see `docs/conf.py`) and for the test
+# that imports the scanner directly, but it is not a package and nothing
+# installs it. Both tools have to be told, or the extensions type-check as a
+# pair of unresolved imports.
+extra-paths = ["docs/_ext"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -36,7 +58,7 @@ asyncio_mode = "auto"
 
 [tool.ruff]
 line-length = 100
-src = ["src", "tests"]
+src = ["src", "tests", "docs/_ext"]
 
 [tool.ruff.lint]
 # `S` is flake8-bandit: the mechanical half of the phase 10 security audit, kept
@@ -49,3 +71,6 @@ select = ["E", "F", "I", "UP", "B", "SIM", "S"]
 # `assert` is the whole vocabulary, and `subprocess` runs `node` or `git` with
 # arguments written three lines above the call.
 "tests/**" = ["S101", "S104", "S105", "S106", "S107", "S603", "S607"]
+# Sphinx names the config values it reads, and every one of them is a module-level
+# assignment that looks like a shadowed builtin or an unused global.
+"docs/conf.py" = ["A001", "E402"]

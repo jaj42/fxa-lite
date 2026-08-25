@@ -70,6 +70,19 @@ def derive_secret(token: str, salt: str, secret: str) -> str:
     return base64.urlsafe_b64encode(derived).decode("ascii")
 
 
+# DIVERGENCE: tokenserver-secret-derived — the shared secret falls out of the signing key
+#   upstream: `tokenserver_shared_secret` must be configured, because the
+#     tokenserver and the storage node are separate deployments that have to be
+#     told the same string.
+#   fxa-lite: absent an explicit value, it is HKDF'd from the OAuth signing key
+#     under `fxa-lite/tokenserver-shared-secret`.
+#   why: the two tiers are one process here, so there is nobody to agree with,
+#     and a second secret to manage is a second secret to lose. Deriving it ties
+#     its rotation to the signing key's, which is the right coupling.
+#   cost: rotating the signing key invalidates outstanding Sync tokens as well
+#     as outstanding JWTs. That costs a client one extra request. The derivation
+#     is domain-separated: `SECRET_INFO` appears nowhere else, and the key's only
+#     other use is RS256.
 def resolve_shared_secret(configured: str | None, private_key: rsa.RSAPrivateKey) -> str:
     """The secret the tokenserver and storage tiers share.
 

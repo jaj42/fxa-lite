@@ -203,6 +203,15 @@ def _parse_scope(value: str, field: str) -> ScopeSet:
         raise errors.oauth_invalid_request_parameter({"keys": [field]}) from exc
 
 
+# DIVERGENCE: acr-values-refused — `AAL2` is an error, not a prompt
+#   upstream: honours `acr_values=AAL2` by requiring a TOTP-verified session,
+#     and puts `acr` in the resulting token.
+#   fxa-lite: errno 120, mismatched ACR values. There is one authentication
+#     method here and no second factor to escalate to.
+#   why: answering with a token that claims AAL2 would be a lie a relier acts
+#     on; prompting for a factor that does not exist would be a dead end.
+#   cost: a relier that insists on AAL2 cannot use this server, which is the
+#     honest outcome. `max_age` is honoured normally.
 def _check_authentication_strength(payload: AuthorizationRequest, auth_at: int) -> None:
     """`acr_values` and `max_age`, the two ways a relier asks for a stronger sign-in.
 
@@ -590,6 +599,18 @@ def _describe_refresh_token(token: str, request: Request) -> dict[str, Any] | No
     }
 
 
+# DIVERGENCE: access-tokens-not-revocable — revocation covers refresh tokens only
+#   upstream: stores access tokens, so `/oauth/destroy` can delete one.
+#   fxa-lite: an access token is a self-contained JWT with no server-side row.
+#     Presenting one here is accepted and does nothing; a refresh token is
+#     really deleted.
+#   why: a TTL at or below six hours is what buys the whole tier its absence of
+#     state — no token table, no cleanup, no growth. Answering an error instead
+#     would tell a client something untrue about a token it will stop being able
+#     to use anyway.
+#   cost: a compromised access token stays valid for up to `ttl.access_token`.
+#     Revoking the refresh token stops the next one being minted, and
+#     `fxa-lite account remove` stops all of them.
 @router.post("/oauth/destroy")
 def oauth_destroy(payload: DestroyRequest, request: Request) -> dict[str, Any]:
     """RFC 7009 revocation.

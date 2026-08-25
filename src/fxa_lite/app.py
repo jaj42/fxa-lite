@@ -151,6 +151,18 @@ def create_app(
     return app
 
 
+# DIVERGENCE: root-belongs-to-the-content-server — `/` is the sign-in page
+#   upstream: the auth server answers `/` with its version document and the
+#     content server answers `/` with the sign-in page. They are two origins, so
+#     both are true at once.
+#   fxa-lite: one origin, so `/` is the page Firefox opens to sign in and the
+#     version document lives only at `/__version__`.
+#   why: `identity.fxaccounts.autoconfig.uri` points a browser at an origin, and
+#     what it opens there has to be the page. Everything else in the layout is
+#     ours to choose because discovery announces it; this one is forced.
+#   cost: a tool that probes `/` for the auth server's version document finds
+#     HTML. `/__version__`, `/__heartbeat__` and `/__lbheartbeat__` are where
+#     upstream also serves them.
 def _add_defaults(app: FastAPI, config: Config) -> None:
     """`lib/routes/defaults.js` — the operational endpoints, plus `/config`."""
 
