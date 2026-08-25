@@ -212,14 +212,14 @@ output=$($docker run --rm -v "$volume:/data" "${harden[@]}" "$image" account lis
 expect_contains "account list finds it" "$output" "$email"
 
 # The database must not be readable by anyone else either — it holds kA in the
-# clear and session token ids that are themselves the credential.  Today
-# sqlite3.connect uses the umask and lands 0644: that is AUDIT.md's F5, still
-# open, so this warns rather than fails.  Promote it to `bad` when F5 lands.
+# clear and session token ids that are themselves the credential.  AUDIT.md's F5:
+# sqlite3.connect used the umask and landed 0644, and `db._restrict` now narrows
+# it on every connect, before the WAL pragma so the sidecars inherit the mode.
 modes=$($docker run --rm -v "$volume:/data" --entrypoint sh "$image" \
   -c 'stat -c "%a %U" /data/fxa.sqlite')
 case "$modes" in
   600\ fxa) ok "database is 0600 and owned by the runtime user" ;;
-  *\ fxa) warn "database is '$modes' — AUDIT.md F5, not yet fixed (ownership is right)" ;;
+  *\ fxa) bad "database is '$modes', want '600 fxa' — AUDIT.md F5 has regressed" ;;
   *) bad "database is '$modes': wrong owner, so /data ownership is broken" ;;
 esac
 

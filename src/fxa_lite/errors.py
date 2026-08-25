@@ -35,6 +35,7 @@ class Errno:
     INVALID_REQUEST_SIGNATURE = 109
     INVALID_TOKEN = 110
     REQUEST_TOO_LARGE = 113
+    THROTTLED = 114
     ENDPOINT_NOT_SUPPORTED = 116
     INCORRECT_EMAIL_CASE = 120
     DEVICE_UNKNOWN = 123
@@ -156,6 +157,27 @@ def request_body_too_large() -> FxaError:
         errno=Errno.REQUEST_TOO_LARGE,
         error="Request Entity Too Large",
         message="Request body too large",
+    )
+
+
+def too_many_requests(retry_after: int) -> FxaError:
+    """`AppError.tooManyRequests` — the customs server's answer, ours by hand.
+
+    Both the `retryAfter` body field and the `Retry-After` header are sent,
+    which `feature_not_enabled` below deliberately refuses to do. The
+    difference is that this one is true: Firefox reads the header in
+    `HawkClient._constructError`, caches the value as `backoffError` and stops
+    sending FxA requests until it expires — exactly the behaviour wanted from a
+    client that has just failed a password check ten times, and exactly the
+    behaviour not wanted from an answer that will never change.
+    """
+    return FxaError(
+        code=429,
+        errno=Errno.THROTTLED,
+        error="Too Many Requests",
+        message="Client has sent too many requests",
+        headers={"Retry-After": str(retry_after)},
+        retryAfter=retry_after,
     )
 
 

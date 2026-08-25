@@ -20,6 +20,7 @@ from . import errors
 from .crypto import onepw
 from .crypto.tokens import TokenKeys, TokenType, bundle_account_keys, new_token
 from .db import Account, AccountExistsError, Database, KeyFetchToken, SessionToken, normalize_email
+from .throttle import FailureThrottle
 
 #: `password.js` hash version 1 — scrypt with the parameters in `crypto/onepw.py`.
 VERIFIER_VERSION = 1
@@ -91,21 +92,39 @@ def provision_with_password(
 
 
 def authenticate(
-    db: Database, *, email: str, auth_pw: bytes
+    db: Database,
+    *,
+    email: str,
+    auth_pw: bytes,
+    throttle: FailureThrottle | None = None,
 ) -> tuple[Account, onepw.StretchedPassword]:
     """Check `authPW` against the stored verify hash.
 
     Returns the stretched password too: unwrapping `wrapKb` for a key fetch
     token needs it, and scrypt is slow enough that doing it twice is rude.
+
+    `throttle` is where the missing customs server lives. The order below is
+    the point of it: the account lookup is one indexed SELECT, and an address
+    with no account raises before `onepw.stretch` runs — so an unknown email
+    cannot drive scrypt at all, and cannot put an entry in the throttle's table
+    either. Only a *known* account whose password was wrong is counted, and
+    only that account's own next attempt pays for it.
     """
     account = db.account_by_email(email)
     if account is None:
         raise errors.unknown_account(email)
+    key = normalize_email(email)
+    if throttle is not None:
+        throttle.check(key)
     stretched = onepw.stretch(auth_pw, bytes.fromhex(account.auth_salt))
     if not stretched.matches(bytes.fromhex(account.verify_hash)):
+        if throttle is not None:
+            throttle.record_failure(key)
         # Passing the stored spelling lets a case-only mismatch answer errno 120
         # instead of 103, which is how clients know to retry rather than reprompt.
         raise errors.incorrect_password(account.email, email.strip())
+    if throttle is not None:
+        throttle.record_success(key)
     return account, stretched
 
 

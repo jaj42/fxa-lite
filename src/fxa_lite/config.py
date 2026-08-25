@@ -32,6 +32,16 @@ DEFAULT_TOKENSERVER_TTL = 3600
 LOG_LEVELS = ("debug", "info", "warning", "error")
 DEFAULT_LOG_LEVEL = "info"
 
+#: Failed password checks a single account tolerates inside the window below
+#: before `/account/login` refuses to run scrypt again. Ten is generous for a
+#: person typing and worthless to someone guessing: at this rate a six-word
+#: passphrase outlasts the sun. Only *failures* are counted, so a client that
+#: knows the password is never locked out by one that does not.
+DEFAULT_FAILED_LOGIN_LIMIT = 10
+#: And how long they are remembered. Short enough that a fat-fingered morning
+#: is over by the time coffee is, long enough that guessing gains nothing.
+DEFAULT_FAILED_LOGIN_WINDOW = 300
+
 
 class ConfigError(ValueError):
     """Raised for a malformed or incomplete config file."""
@@ -62,6 +72,27 @@ class LogConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SecurityConfig:
+    """The two switches an operator may reasonably want on a public origin.
+
+    Both default to the safe answer, which is why they are here rather than
+    hard-coded: a household server is reachable from the internet the moment a
+    port is forwarded, and the defaults have to survive that.
+    """
+
+    #: Whether `POST /v1/account/create` provisions accounts for anyone who
+    #: asks. Off: `fxa-lite account add` is the signup funnel, and an open
+    #: endpoint here hands an unauthenticated stranger one scrypt per request.
+    open_registration: bool = False
+    #: Consecutive failed password checks per account before `/account/login`
+    #: answers 429 instead of stretching a password. 0 disables the throttle.
+    failed_login_limit: int = DEFAULT_FAILED_LOGIN_LIMIT
+    #: Seconds a failure is remembered for, and what a throttled client is told
+    #: to wait.
+    failed_login_window: int = DEFAULT_FAILED_LOGIN_WINDOW
+
+
+@dataclass(frozen=True, slots=True)
 class TtlConfig:
     access_token: int = DEFAULT_ACCESS_TOKEN_TTL
     authorization_code: int = DEFAULT_CODE_TTL
@@ -76,6 +107,7 @@ class Config:
     paths: PathsConfig = field(default_factory=PathsConfig)
     ttl: TtlConfig = field(default_factory=TtlConfig)
     log: LogConfig = field(default_factory=LogConfig)
+    security: SecurityConfig = field(default_factory=SecurityConfig)
     #: HMAC secret shared between the tokenserver and sync storage tiers.
     tokenserver_shared_secret: str | None = None
     #: OAuth clients: the three browsers, plus anything `[[clients]]` adds.
@@ -109,7 +141,16 @@ def from_dict(
     base = Path(base) if base is not None else Path.cwd()
     _reject_unknown(
         data,
-        {"public_url", "tokenserver_shared_secret", "clients", "listen", "paths", "ttl", "log"},
+        {
+            "public_url",
+            "tokenserver_shared_secret",
+            "clients",
+            "listen",
+            "paths",
+            "ttl",
+            "log",
+            "security",
+        },
         "",
     )
 
@@ -118,11 +159,17 @@ def from_dict(
     paths_raw = _section(data, "paths")
     ttl_raw = _section(data, "ttl")
     log_raw = _section(data, "log")
+    security_raw = _section(data, "security")
 
     _reject_unknown(listen_raw, {"host", "port"}, "listen")
     _reject_unknown(log_raw, {"level"}, "log")
     _reject_unknown(paths_raw, {"database", "signing_key", "retired_key"}, "paths")
     _reject_unknown(ttl_raw, {"access_token", "authorization_code", "tokenserver_token"}, "ttl")
+    _reject_unknown(
+        security_raw,
+        {"open_registration", "failed_login_limit", "failed_login_window"},
+        "security",
+    )
 
     listen = ListenConfig(
         host=_get(listen_raw, "host", str, "listen", DEFAULT_HOST),
@@ -143,6 +190,13 @@ def from_dict(
         tokenserver_token=_seconds(ttl_raw, "tokenserver_token", DEFAULT_TOKENSERVER_TTL),
     )
     log = LogConfig(level=_log_level(_get(log_raw, "level", str, "log", DEFAULT_LOG_LEVEL)))
+    security = SecurityConfig(
+        open_registration=_get(security_raw, "open_registration", bool, "security", False),
+        failed_login_limit=_count(security_raw, "failed_login_limit", DEFAULT_FAILED_LOGIN_LIMIT),
+        failed_login_window=_seconds(
+            security_raw, "failed_login_window", DEFAULT_FAILED_LOGIN_WINDOW, where="security"
+        ),
+    )
 
     clients_raw = data.get("clients", [])
     if not isinstance(clients_raw, list) or not all(
@@ -164,6 +218,7 @@ def from_dict(
         paths=paths,
         ttl=ttl,
         log=log,
+        security=security,
         tokenserver_shared_secret=secret,
         clients=clients,
         source=source,
@@ -228,10 +283,18 @@ def _port(value: int) -> int:
     return value
 
 
-def _seconds(data: dict[str, Any], key: str, default: int) -> int:
-    value = _get(data, key, int, "ttl", default)
+def _seconds(data: dict[str, Any], key: str, default: int, *, where: str = "ttl") -> int:
+    value = _get(data, key, int, where, default)
     if value <= 0:
-        raise ConfigError(f"ttl.{key} must be a positive number of seconds")
+        raise ConfigError(f"{where}.{key} must be a positive number of seconds")
+    return value
+
+
+def _count(data: dict[str, Any], key: str, default: int) -> int:
+    """A non-negative limit; 0 is a meaningful value — "no throttle at all"."""
+    value = _get(data, key, int, "security", default)
+    if value < 0:
+        raise ConfigError(f"security.{key} must not be negative")
     return value
 
 

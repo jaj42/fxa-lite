@@ -66,7 +66,12 @@ def oauth_credentials(request: Request) -> TokenCredentials:
     try:
         claims = keys.verify(token)
     except jose.JWTError as exc:
-        raise errors.profile_unauthorized(str(exc)) from exc
+        # A constant reason, not `str(exc)`. Those messages name the `alg` and
+        # `kid` the caller sent (`crypto/jose.py`), and this route is
+        # unauthenticated: reflecting attacker-chosen bytes back out of it buys
+        # a client nothing it can act on — every one of them means "get a new
+        # token" — and is a parser detail nobody outside needs.
+        raise errors.profile_unauthorized("Invalid token") from exc
     if jose.decode_jwt_header(token).get("typ") != "at+JWT":
         raise errors.profile_unauthorized("Not an access token")
     if claims.get("iss") != request.app.state.config.public_url:

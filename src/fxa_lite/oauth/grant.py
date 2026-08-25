@@ -28,7 +28,7 @@ from .scopes import ScopeSet
 
 #: `at+JWT` from RFC 9068: what tells a resource server this is an access token
 #: and not an ID token that happens to verify.
-ACCESS_TOKEN_TYP = "at+JWT"
+ACCESS_TOKEN_TYP = "at+JWT"  # noqa: S105 - a JOSE `typ` header value
 
 #: `UNTRUSTED_CLIENT_ALLOWED_SCOPES` — all an unregistered relier may ever ask for.
 UNTRUSTED_ALLOWED_SCOPES = ScopeSet.from_array(

@@ -59,7 +59,7 @@ PKCE_METHOD = "S256"
 MAX_AGE_LEEWAY = 5
 
 GRANT_AUTHORIZATION_CODE = "authorization_code"
-GRANT_REFRESH_TOKEN = "refresh_token"
+GRANT_REFRESH_TOKEN = "refresh_token"  # noqa: S105 - an RFC 6749 grant type
 #: The direct grant. Upstream names it for the assertion it used to carry; what
 #: it means now is "mint an access token from a session token".
 GRANT_FXA_CREDENTIALS = "fxa-credentials"
@@ -537,12 +537,12 @@ def _verified_access_token(token: str, request: Request) -> dict[str, Any]:
 def introspect(payload: IntrospectRequest, request: Request) -> dict[str, Any]:
     """RFC 7662. Unlike `/verify`, an inactive token is an answer, not an error."""
     order = ["access_token", "refresh_token"]
-    if payload.token_type_hint == "refresh_token":
+    if payload.token_type_hint == "refresh_token":  # noqa: S105 - an RFC 7662 hint
         order.reverse()
     for token_type in order:
         described = (
             _describe_access_token(payload.token, request)
-            if token_type == "access_token"
+            if token_type == "access_token"  # noqa: S105 - a token kind, not a token
             else _describe_refresh_token(payload.token, request)
         )
         if described is not None:

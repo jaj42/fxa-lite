@@ -241,9 +241,11 @@ class SyncStore:
     def collection_names(self, ids: Sequence[int]) -> dict[int, str]:
         if not ids:
             return {}
+        # Interpolated: a run of `?`, one per id. The ids themselves are bound.
         placeholders = ",".join("?" * len(ids))
         rows = self.connection.execute(
-            f"SELECT id, name FROM sync_collections WHERE id IN ({placeholders})", tuple(ids)
+            f"SELECT id, name FROM sync_collections WHERE id IN ({placeholders})",  # noqa: S608
+            tuple(ids),
         )
         return {int(row["id"]): str(row["name"]) for row in rows}
 
@@ -383,8 +385,13 @@ class SyncStore:
         columns = "id, modified, payload, sortindex, expiry" if full else "id"
         # One row more than asked for: its presence is how we know there is a
         # next page without counting the whole collection.
+        # Every interpolated fragment above is a literal from this function:
+        # `columns` is one of two fixed strings, `where` is built from literals
+        # with `?` for each value, and `order` comes out of `orders` by lookup
+        # — `query.sort` reaches SQL only as a dict key, never as text. Nothing
+        # a request supplies is formatted into this string; it is all bound.
         sql = (
-            f"SELECT {columns} FROM sync_bso WHERE {' AND '.join(where)} {order} "
+            f"SELECT {columns} FROM sync_bso WHERE {' AND '.join(where)} {order} "  # noqa: S608
             f"LIMIT ? OFFSET ?"
         )
         rows = self.connection.execute(
@@ -444,14 +451,17 @@ class SyncStore:
             updates.append("expiry = excluded.expiry")
         if payload is not None or sortindex is not None:
             updates.append("modified = excluded.modified")
+        # `updates` holds literal assignments chosen by which fields the
+        # request set, not their values.
         conflict = f"DO UPDATE SET {', '.join(updates)}" if updates else "DO NOTHING"
 
-        self.connection.execute(
-            f"""
+        upsert = f"""
             INSERT INTO sync_bso (uid, collection_id, id, sortindex, payload, modified, expiry)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(uid, collection_id, id) {conflict}
-            """,
+            """  # noqa: S608
+        self.connection.execute(
+            upsert,
             (
                 self.uid,
                 collection_id,
@@ -504,13 +514,12 @@ class SyncStore:
     def delete_bsos(self, collection: str, ids: Sequence[str]) -> int:
         collection_id = self.collection_id(collection)
         if ids:
-            self.connection.execute(
-                f"""
+            # Again a run of `?`; the ids are bound alongside.
+            delete = f"""
                 DELETE FROM sync_bso
                 WHERE uid = ? AND collection_id = ? AND id IN ({','.join('?' * len(ids))})
-                """,
-                (self.uid, collection_id, *ids),
-            )
+                """  # noqa: S608
+            self.connection.execute(delete, (self.uid, collection_id, *ids))
         return self.update_collection(collection_id)
 
     def delete_collection(self, collection: str) -> int:

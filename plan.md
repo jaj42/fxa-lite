@@ -981,7 +981,7 @@ As built:
   two spellings can decode to the same bytes and a character-level flip is allowed to be a no-op).
 - Verified: 703 tests, `ruff check` and `ty check` clean.
 
-### Phase 10 — security audit
+### Phase 10 — security audit ✅ done
 
 The code is complete and the dependency set is settled, so there is a fixed target to audit.
 Two things make this worth doing properly rather than as a `bandit` run: the threat model is
@@ -1062,6 +1062,54 @@ Deliverable: findings triaged fixed / accepted-with-reason / out-of-scope, with 
 written into the docs rather than into a file nobody opens. Every fix lands with a test, as
 everything else in this project has. Then re-run the suite **and** phase 8 against real Firefox —
 the audit will touch auth-path code, and that path has exactly one integration test that matters.
+
+As built:
+
+- **`AUDIT.md` is the deliverable**, written as a reading pass first and then annotated with what
+  each finding became. Eight went to *fix*, eleven to *confirm and pin*, five to *accept*, one to
+  *noted, not fixed*. The accepted five are in the README's new **Security** section — the file an
+  operator actually opens — alongside what the deployment is required to provide.
+- **The three cheapest findings were the ones no one had looked at.** `[log] level = "debug"`
+  wrote a complete, spendable Sync credential to the terminal: `/token/1.0/sync/1.5` answers
+  `{"id", "key"}` and neither name was in `SECRET_KEYS`. `key` could be redacted globally; `id`
+  could not, because everywhere else it is a BSO id, a device id or a client id — so `tracing`
+  grew `PATH_SECRET_KEYS`, one entry, scoped to `/token/`. The SQLite file was created with the
+  umask, i.e. 0644, holding `kA` and the session token ids that *are* the credential; it is now
+  chmod'd 0600 before `PRAGMA journal_mode = WAL`, which is what makes SQLite give `-wal` and
+  `-shm` the same mode. And `/static/icon.svg` — same-origin SVG, which is a document when it is
+  navigated to — was served with none of the headers the shell gets.
+- **The two decisions the plan left open, decided.** Registration: `POST /v1/account/create` was
+  wire-compatible and ungated, so anyone who could reach the origin could spend a 64 MiB scrypt
+  and keep the account. It is off unless `[security] open_registration` says otherwise; no page in
+  `content/assets/` calls it, so nothing real pays for that. Rate limiting: **failed** password
+  checks are counted per account, before scrypt, and answered 429 / errno 114. Counting failures
+  rather than requests is what makes it safe — an attacker cannot lock a household out of its own
+  accounts — and `accounts.authenticate` still raises `unknown_account` before stretching, so an
+  unknown address drives no scrypt and earns no table entry. Per-IP stays the proxy's job, since
+  behind nginx every client is `127.0.0.1`; phase 11's `limit_req_zone` already ships uncommented.
+- **A body cap was the one structural change.** Every tier reads the body before it checks the
+  signature — it must, because the signature may cover the body — so "authenticate first" was
+  never available. `middleware.BodyLimit` is pure ASGI under `tracing.Trace`: a declared
+  `Content-Length` over the limit is refused without reading a byte, and a chunked body is counted
+  as it arrives. It renders its own refusal in all three envelopes, because a middleware runs
+  outside every handler in `app.py` and a Sync client handed the accounts envelope reads a JSON
+  object where the protocol says an integer.
+- **`ruff`'s `S` found nothing.** Ten findings in `src`, all of them the rule misreading a
+  protocol constant (`"passwordChangeToken"` is a `tokenTypeID`, `"at+JWT"` is a JOSE header) or
+  the four `store.py` queries, where every interpolated fragment is a literal — a run of `?`, a
+  fixed column list, an `ORDER BY` reached by dict lookup. Each carries a `noqa` with the reason,
+  and `S` is now in `select` so the next one has to be argued for.
+- **The "confirm and pin" list is `tests/test_security.py`.** HAWK grants no more than Bearer; a
+  dropped scope cannot be regranted on refresh; one file mints the tokenserver audience; a BSO id
+  of `'or'1'='1` is data; `hmac.compare_digest` is in the five files it should be in; no envelope
+  carries a traceback. The one thing a test cannot express — that the HAWK payload hash cannot be
+  stripped, because `hash` is a field *inside* the normalized string — is written down in
+  `AUDIT.md` instead.
+- Verified: 813 tests, `ruff check` and `ty check` clean. **The phase-8 re-run against real
+  Firefox is still owed** — this phase touched the auth path (`accounts.authenticate` grew the
+  throttle, every request now passes a body cap), and that path has exactly one integration test
+  that matters. Sign in, fetch keys, take a tokenserver token and sync a collection before this
+  is called finished.
 
 ### Phase 11 — Docker ✅ done
 
@@ -1263,9 +1311,9 @@ becomes instructions.
   hardens it → `/__heartbeat__`, the discovery document (asserted to name the external origin and
   *not* the container's), `/v1/jwks` → `compose config` and `nginx -t`. Passes end to end.
 - The signing key after a containerised `keygen` is `600 fxa fxa` — mode *and* owner, since either
-  half alone proves nothing. The database is `644 fxa`: correct ownership, and the mode is
-  AUDIT.md's F5, still open. The smoke script warns rather than fails there and says which
-  finding it is; the check becomes an assertion when F5 lands.
+  half alone proves nothing. The database was `644 fxa` at the time: correct ownership, and the
+  mode was AUDIT.md's F5, then still open, so the smoke script warned and named the finding.
+  Phase 10 fixed F5 and the check is now an assertion.
 - Not done, deliberately: no multi-arch build was executed. `docker buildx build --platform
   linux/amd64,linux/arm64` is recorded in the Dockerfile header, and both pinned indexes were
   checked to carry linux/arm64, but this machine runs podman without a buildx equivalent, and an

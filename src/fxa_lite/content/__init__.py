@@ -48,6 +48,12 @@ PAGE_PATHS = (
     "/settings",
 )
 
+#: What an asset — a stylesheet, a script, an SVG — is allowed to do when it is
+#: navigated to directly rather than loaded by the shell. Nothing: an SVG opened
+#: at its own URL is a document, and this is the policy that says that document
+#: may not fetch, script or frame anything.
+ASSET_CONTENT_SECURITY_POLICY = "default-src 'none'; frame-ancestors 'none'"
+
 #: `default-src 'none'` and no `unsafe-inline`: everything this page loads is
 #: one of our own files, and everything it talks to is this origin.
 CONTENT_SECURITY_POLICY = (
@@ -171,14 +177,21 @@ def static_asset(name: str, request: Request) -> Response:
         # Rendered as the usual FxA envelope by `app.py`'s handler, so even a
         # mistyped asset URL answers in the one format this server speaks.
         raise HTTPException(status_code=404)
+    # The same protections the shell gets, for the same reason: `icon.svg` is
+    # served from this origin as `image/svg+xml`, and an SVG navigated to
+    # directly is a document that can carry script. `nosniff` and a null CSP
+    # cost a cached asset nothing and close that off.
     headers = {
         "ETag": asset.etag,
         "Cache-Control": "public, max-age=0, must-revalidate",
+        "Content-Security-Policy": ASSET_CONTENT_SECURITY_POLICY,
+        "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
     }
     if request.headers.get("if-none-match") == asset.etag:
         return Response(status_code=304, headers=headers)
     return Response(content=asset.body, media_type=asset.media_type, headers=headers)
 
 
-__all__ = ["PAGE_PATHS", "router"]
+__all__ = ["ASSET_CONTENT_SECURITY_POLICY", "CONTENT_SECURITY_POLICY", "PAGE_PATHS", "router"]

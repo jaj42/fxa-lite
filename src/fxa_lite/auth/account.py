@@ -15,7 +15,7 @@ from fastapi import APIRouter, Query, Request
 
 from .. import accounts, errors
 from ..db import Database
-from .credentials import KeyFetch, Session, database, optional_session_credentials
+from .credentials import KeyFetch, Session, database, optional_session_credentials, throttle
 from .models import (
     AccountCreate,
     AccountDestroy,
@@ -38,7 +38,19 @@ def account_create(
     fxa-lite has no signup funnel — accounts are normally provisioned with
     `fxa-lite account add` — but this is the endpoint the reference client
     exercises, so it stays wire-compatible and does exactly what the CLI does.
+
+    It is nevertheless **off unless `[security] open_registration` says
+    otherwise**, because wire-compatible here meant reachable by anyone who can
+    reach the origin: no content-server page calls this route (nothing in
+    `content/assets/*.js` mentions it), so gating it costs no client, while
+    leaving it open hands a stranger one 64 MiB scrypt per request and an
+    account on somebody's household server at the end of it.
     """
+    if not request.app.state.config.security.open_registration:
+        # 403/202, and deliberately without `retryAfter` — see
+        # `errors.feature_not_enabled` for why a permanent answer must not
+        # carry one.
+        raise errors.feature_not_enabled()
     db = database(request)
     account, stretched = accounts.provision(
         db,
@@ -67,7 +79,10 @@ def account_login(
 ) -> dict[str, Any]:
     db = database(request)
     account, stretched = accounts.authenticate(
-        db, email=payload.email, auth_pw=bytes.fromhex(payload.authPW)
+        db,
+        email=payload.email,
+        auth_pw=bytes.fromhex(payload.authPW),
+        throttle=throttle(request),
     )
     session, token = accounts.start_session(
         db, account, user_agent=request.headers.get("user-agent", "")
@@ -156,7 +171,10 @@ def account_destroy(
 ) -> dict[str, Any]:
     db = database(request)
     account, _ = accounts.authenticate(
-        db, email=payload.email, auth_pw=bytes.fromhex(payload.authPW)
+        db,
+        email=payload.email,
+        auth_pw=bytes.fromhex(payload.authPW),
+        throttle=throttle(request),
     )
     if account.uid != credentials.account.uid:
         raise errors.unknown_account(payload.email)

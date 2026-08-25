@@ -17,7 +17,9 @@ one writes.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+import stat
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -26,6 +28,8 @@ from pathlib import Path
 from typing import Any
 
 MEMORY = Path(":memory:")
+
+logger = logging.getLogger(__name__)
 
 SCHEMA_V1 = """
 CREATE TABLE accounts (
@@ -361,6 +365,29 @@ class Device:
     available_commands: dict[str, str] = field(default_factory=dict)
 
 
+def _restrict(path: Path) -> None:
+    """Narrow a database file to owner-only, if it is not already.
+
+    Best effort on purpose: a database on a filesystem with no Unix modes at
+    all (a network share, a bind mount with a fixed mode) is a deployment
+    choice, and failing to start over it would be worse than the warning.
+    """
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError:  # pragma: no cover - the connect above would have failed
+        return
+    if not mode & 0o077:
+        return
+    try:
+        path.chmod(0o600)
+    except OSError:
+        logger.warning(
+            "%s is mode %o and cannot be narrowed; it holds account key material",
+            path,
+            mode,
+        )
+
+
 class Database:
     """Owns the connection pool and every statement fxa-lite runs."""
 
@@ -402,6 +429,15 @@ class Database:
             raise DatabaseError(f"cannot open database {self.path}: {exc}") from exc
         connection.row_factory = sqlite3.Row
         if not self._uri:
+            # Before WAL, and before anything is written. `sqlite3.connect`
+            # creates the file with the process umask, so a default umask
+            # leaves it world-readable — and this file holds kA in the clear,
+            # the sealed key bundles, and the session token ids that *are* the
+            # credential a client presents (the accounts API authenticates on
+            # the id and verifies no MAC). Doing it here rather than after the
+            # PRAGMA is what makes SQLite create `-wal` and `-shm` with the
+            # same mode: it copies the database file's permissions.
+            _restrict(self.path)
             # WAL is a file-format thing; an in-memory database stays in memory.
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = NORMAL")

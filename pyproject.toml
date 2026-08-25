@@ -39,4 +39,13 @@ line-length = 100
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+# `S` is flake8-bandit: the mechanical half of the phase 10 security audit, kept
+# on so a new `==` on a secret or a new f-string query has to be argued for in a
+# `noqa` rather than merged unnoticed.
+select = ["E", "F", "I", "UP", "B", "SIM", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# The test suite is the one place where a hardcoded password is the point, an
+# `assert` is the whole vocabulary, and `subprocess` runs `node` or `git` with
+# arguments written three lines above the call.
+"tests/**" = ["S101", "S104", "S105", "S106", "S107", "S603", "S607"]

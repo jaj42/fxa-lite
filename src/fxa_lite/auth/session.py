@@ -14,7 +14,7 @@ from fastapi import APIRouter, Query, Request
 from .. import accounts, errors
 from ..crypto.tokens import TokenType, derive_token_keys, new_token
 from ..db import SessionToken
-from .credentials import Session, database
+from .credentials import Session, database, throttle
 from .models import SessionDestroy, SessionDuplicate, SessionReauth
 
 router = APIRouter(tags=["session"])
@@ -96,7 +96,10 @@ def session_reauth(
     """
     db = database(request)
     account, stretched = accounts.authenticate(
-        db, email=payload.email, auth_pw=bytes.fromhex(payload.authPW)
+        db,
+        email=payload.email,
+        auth_pw=bytes.fromhex(payload.authPW),
+        throttle=throttle(request),
     )
     if account.uid != credentials.account.uid:
         raise errors.unknown_account(payload.email)

@@ -26,7 +26,14 @@ PUBLIC_URL = "http://fxa.example.com"
 
 @pytest.fixture
 def config() -> Config:
-    return from_dict({"public_url": PUBLIC_URL})
+    """The app under test, with `/account/create` open.
+
+    `[security] open_registration` defaults to *false* — see `auth/account.py` —
+    but the conformance client signs up over HTTP exactly as the reference
+    client does, and that round trip is what most of these tests are about.
+    The gate itself is tested in `test_security.py`, against the default.
+    """
+    return from_dict({"public_url": PUBLIC_URL, "security": {"open_registration": True}})
 
 
 @pytest.fixture(scope="session")

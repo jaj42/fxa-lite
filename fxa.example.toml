@@ -42,6 +42,28 @@ signing_key = "signing-key.json"
 # output still describes someone's account: treat it as sensitive.
 # level = "debug"
 
+[security]
+# Whether POST /v1/account/create provisions an account for anyone who asks.
+# Off by default, and it is the endpoint an internet-facing origin is most
+# likely to be found by: each attempt is one unauthenticated scrypt (64 MiB,
+# ~100 ms of server work) with an attacker-chosen email address, and an account
+# on your household server at the end of it. No page here calls it — accounts
+# are provisioned with `fxa-lite account add` — so leaving it off costs no
+# client. Turn it on only to run the reference client's own signup flow.
+# open_registration = false
+
+# Failed password checks a single account tolerates inside failed_login_window
+# before /v1/account/login answers 429 instead of stretching another password.
+# This is what is left of upstream's customs server. Only *failures* count and
+# a correct password clears the tally, so somebody guessing cannot lock you out
+# of your own account. Set failed_login_limit = 0 to switch it off.
+#
+# Per-IP limiting is not attempted here: behind a reverse proxy every client
+# looks like 127.0.0.1. That half belongs to the proxy — see the limit_req_zone
+# in deploy/nginx.conf.example, which is not optional on a public origin.
+# failed_login_limit = 10
+# failed_login_window = 300
+
 [ttl]
 # Seconds. access_token stays at or below 6h so tokens need no server-side store.
 access_token = 21600

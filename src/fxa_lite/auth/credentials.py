@@ -28,6 +28,7 @@ from fastapi import Depends, Request
 from .. import errors
 from ..crypto.tokens import BEARER_PREFIXES, TokenType
 from ..db import Account, Database, KeyFetchToken, SessionToken
+from ..throttle import FailureThrottle
 
 #: Hawk's own limit, from the library the reference vendored.
 MAX_HEADER_LENGTH = 4096
@@ -92,6 +93,11 @@ def _bearer_id(body: str, token_type: TokenType) -> str:
 
 def database(request: Request) -> Database:
     return request.app.state.db
+
+
+def throttle(request: Request) -> FailureThrottle:
+    """The failed-password counter every route that stretches one must consult."""
+    return request.app.state.throttle
 
 
 def session_credentials(request: Request) -> SessionCredentials:

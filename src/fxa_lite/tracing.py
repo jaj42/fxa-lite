@@ -50,11 +50,20 @@ SECRET_KEYS = frozenset(
         "code",
         "code_verifier",
         "id_token",
+        # The tokenserver's own answer: the derived HAWK MAC key. Nothing else
+        # fxa-lite emits uses this name, so it is safe to redact globally —
+        # unlike its companion `id`, which is below.
+        "key",
         "keyFetchToken",
+        "keyRotationSecret",
         "keys_jwe",
         "oldAuthPW",
         "passwordChangeToken",
         "payload",
+        # A push subscription's keys. Not ours to spend, but they are somebody
+        # else's credential and a log is not where they belong.
+        "pushAuthKey",
+        "pushPublicKey",
         "refresh_token",
         "sessionToken",
         "subject_token",
@@ -63,6 +72,16 @@ SECRET_KEYS = frozenset(
         "wrapKb",
     }
 )
+
+#: Names that are a credential *on some paths and not on others*, so they
+#: cannot go in `SECRET_KEYS` without redacting something harmless everywhere.
+#:
+#: There is one: `id`. `/token/1.0/sync/1.5` answers `{"id": ..., "key": ...}`
+#: where `id` is the HAWK credential the client then presents to `/storage` —
+#: half of a complete, spendable Sync credential. Everywhere else `id` is a BSO
+#: id, a device id or a client id, all of which a debugging session needs to
+#: read.
+PATH_SECRET_KEYS: tuple[tuple[str, frozenset[str]], ...] = (("/token/", frozenset({"id"})),)
 
 #: Long enough to tell two tokens apart in a log, far too short to present one.
 PREFIX_LENGTH = 8
@@ -93,22 +112,30 @@ def configure(level: str) -> None:
     logger.propagate = False
 
 
-def redact(node: Any) -> Any:
+def secrets_for(path: str) -> frozenset[str]:
+    """`SECRET_KEYS`, plus anything this path makes a credential."""
+    extra = frozenset().union(
+        *(names for prefix, names in PATH_SECRET_KEYS if path.startswith(prefix))
+    )
+    return SECRET_KEYS | extra if extra else SECRET_KEYS
+
+
+def redact(node: Any, secrets: frozenset[str] = SECRET_KEYS) -> Any:
     """Walk a decoded JSON document, replacing credentials with a prefix."""
     if isinstance(node, dict):
-        return {key: _value(key, item) for key, item in node.items()}
+        return {key: _value(key, item, secrets) for key, item in node.items()}
     if isinstance(node, list):
-        return [redact(item) for item in node]
+        return [redact(item, secrets) for item in node]
     return node
 
 
-def _value(key: str, node: Any) -> Any:
-    if key in SECRET_KEYS:
-        return _elide(node)
-    return redact(node)
+def _value(key: str, node: Any, secrets: frozenset[str]) -> Any:
+    if key in secrets:
+        return _elide(node, secrets)
+    return redact(node, secrets)
 
 
-def _elide(node: Any) -> Any:
+def _elide(node: Any, secrets: frozenset[str] = SECRET_KEYS) -> Any:
     """Keep the shape, lose the secret."""
     if isinstance(node, str) and len(node) > MIN_REDACTED_LENGTH:
         return f"{node[:PREFIX_LENGTH]}…({len(node)} chars)"
@@ -116,10 +143,10 @@ def _elide(node: Any) -> Any:
         return "…"
     # A non-string under a secret name is a nested envelope, not a credential
     # in itself; its own leaves are still subject to the same rules.
-    return redact(node)
+    return redact(node, secrets)
 
 
-def render_body(raw: bytes) -> str:
+def render_body(raw: bytes, secrets: frozenset[str] = SECRET_KEYS) -> str:
     """A redacted, truncated, single-line rendering of a request or response."""
     if not raw:
         return "(empty)"
@@ -129,19 +156,19 @@ def render_body(raw: bytes) -> str:
         # `application/newlines`, form bodies, static assets: the size is the
         # only thing that can be said without guessing at the encoding.
         return f"<{len(raw)} bytes, not JSON>"
-    rendered = json.dumps(redact(decoded), sort_keys=True, ensure_ascii=False)
+    rendered = json.dumps(redact(decoded, secrets), sort_keys=True, ensure_ascii=False)
     if len(rendered) > MAX_BODY_CHARS:
         return f"{rendered[:MAX_BODY_CHARS]}… ({len(rendered)} chars)"
     return rendered
 
 
-def render_query(raw: bytes) -> str:
+def render_query(raw: bytes, secrets: frozenset[str] = SECRET_KEYS) -> str:
     """Query strings carry credentials too — `?code=` on an OAuth redirect."""
     if not raw:
         return ""
     pairs = parse_qsl(raw.decode("utf-8", "replace"), keep_blank_values=True)
     return urlencode(
-        [(key, _elide(value) if key in SECRET_KEYS else value) for key, value in pairs]
+        [(key, _elide(value) if key in secrets else value) for key, value in pairs]
     )
 
 
@@ -213,7 +240,8 @@ class Trace:
     def _log(
         self, scope: Scope, path: str, status: int, request_body: bytes, response_body: bytes
     ) -> None:
-        query = render_query(scope.get("query_string", b""))
+        secrets = secrets_for(path)
+        query = render_query(scope.get("query_string", b""), secrets)
         target = f"{path}?{query}" if query else path
         logger.debug(
             "%s %s -> %s auth=%s\n    request : %s\n    response: %s",
@@ -221,8 +249,8 @@ class Trace:
             target,
             status or "(no response)",
             render_authorization(_header(scope, b"authorization")),
-            render_body(request_body),
-            render_body(response_body),
+            render_body(request_body, secrets),
+            render_body(response_body, secrets),
         )
 
 

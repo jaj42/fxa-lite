@@ -12,6 +12,8 @@ stop the process, not surface as a 500 on the first sign-in.
 from __future__ import annotations
 
 import json
+import logging
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,8 @@ from typing import Any
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from ..crypto import jose
+
+logger = logging.getLogger(__name__)
 
 
 class SigningKeyError(RuntimeError):
@@ -47,6 +51,7 @@ class SigningKeys:
 def load(signing_key: Path, retired_key: Path | None = None) -> SigningKeys:
     """Read the private signing JWK, and optionally a retired public one."""
     private_jwk = _read_jwk(signing_key, "signing key")
+    _warn_if_readable(signing_key)
     try:
         private = jose.jwk_to_private_key(private_jwk)
     except ValueError as exc:
@@ -71,6 +76,30 @@ def load(signing_key: Path, retired_key: Path | None = None) -> SigningKeys:
         verifiers[retired_kid] = jose.jwk_to_public_key(retired_jwk)
 
     return SigningKeys(private=private, kid=kid, verifiers=verifiers, jwks={"keys": keys})
+
+
+def _warn_if_readable(path: Path) -> None:
+    """Say so if the private key is group- or world-readable.
+
+    `keygen` writes it through `os.open(..., 0o600)` and nothing here ever
+    widens it — but a key restored from a backup, copied into a container image
+    or checked out of somebody's dotfiles repo arrives with whatever mode it
+    was given. This is not narrowed automatically the way the database is: the
+    database is a file fxa-lite creates and owns, and the signing key may be a
+    mount, a secret handed in by an orchestrator, or a file deliberately shared
+    with a second process. Saying so and starting is the honest answer.
+    """
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError:  # pragma: no cover - it was read a moment ago
+        return
+    if mode & 0o077:
+        logger.warning(
+            "%s is mode %o: the OAuth signing key should be readable only by "
+            "the user fxa-lite runs as (chmod 600)",
+            path,
+            mode,
+        )
 
 
 def _read_jwk(path: Path, what: str) -> dict[str, Any]:

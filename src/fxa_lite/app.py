@@ -11,9 +11,13 @@ so the layout is ours to choose; see `wellknown.py`.
 The content router is included last, and `/` belongs to it: that is the URL
 Firefox opens to sign in.
 
-`tracing.Trace` wraps the lot. At the default log level it does nothing; at
-`debug` it writes a redacted rendering of every request and response, which is
-the only practical way to see why a client the size of Firefox is unhappy.
+Three middlewares wrap the lot, outermost first.  `tracing.Trace` does nothing
+at the default log level; at `debug` it writes a redacted rendering of every
+request and response, which is the only practical way to see why a client the
+size of Firefox is unhappy.  `middleware.SecurityHeaders` stamps `nosniff` and
+a null CSP on whatever has not set its own.  `middleware.BodyLimit` refuses an
+oversized request body before anything reads it — a route function is far too
+late, because by then the body is buffered.
 
 The error handlers matter as much as the routes.  A client reads `errno`, not
 the HTTP status, so an unhandled exception that escapes as FastAPI's default
@@ -39,6 +43,7 @@ from . import (
     auth,
     content,
     errors,
+    middleware,
     profile,
     syncstorage,
     tokenserver,
@@ -51,6 +56,7 @@ from .oauth import routes as oauth_routes
 from .oauth.clients import Registry
 from .oauth.keys import SigningKeys
 from .oauth.keys import load as load_signing_keys
+from .throttle import FailureThrottle
 from .tokenserver import tokenlib
 
 #: The prefix the reference auth server serves its API from. The OAuth routes
@@ -106,6 +112,13 @@ def create_app(
     app.state.tokenserver_secret = tokenlib.resolve_shared_secret(
         config.tokenserver_shared_secret, keys.private
     )
+    # What is left of the customs server: see `throttle.py`. It is per-app
+    # rather than global so that two apps in one test process — or one
+    # `--reload` generation and the next — do not share a counter.
+    app.state.throttle = FailureThrottle(
+        limit=config.security.failed_login_limit,
+        window=config.security.failed_login_window,
+    )
     if db is not None:
         app.state.db = db
 
@@ -116,6 +129,19 @@ def create_app(
     app.include_router(syncstorage.router, prefix=STORAGE_PREFIX)
     app.include_router(wellknown.router)
     app.include_router(content.router)
+    # Added innermost-first: Starlette wraps each new middleware *around* the
+    # ones already added, so the request meets `Trace`, then `SecurityHeaders`,
+    # then `BodyLimit`, then a route.
+    #
+    # `BodyLimit` has to sit below `Trace` — an oversized body must be refused
+    # before anything, tracing included, accumulates it — and below
+    # `SecurityHeaders`, so its 413 is stamped like every other response.
+    app.add_middleware(
+        middleware.BodyLimit,
+        storage_prefix=STORAGE_PREFIX,
+        tokenserver_prefix=TOKENSERVER_PREFIX,
+    )
+    app.add_middleware(middleware.SecurityHeaders)
     # Outermost, so a request that never reaches a route is still described and
     # the status a handler actually produced is the one recorded. It renders
     # nothing unless the `fxa_lite` logger is at DEBUG.

@@ -33,8 +33,8 @@ class TokenType(StrEnum):
     SESSION = "sessionToken"
     KEY_FETCH = "keyFetchToken"
     ACCOUNT_RESET = "accountResetToken"
-    PASSWORD_CHANGE = "passwordChangeToken"
-    PASSWORD_FORGOT = "passwordForgotToken"
+    PASSWORD_CHANGE = "passwordChangeToken"  # noqa: S105 - a token *type*, not a token
+    PASSWORD_FORGOT = "passwordForgotToken"  # noqa: S105 - likewise
 
 
 #: `Bearer <prefix>_<id>`, per `auth-schemes/bearer-fxa-token.js`. The
