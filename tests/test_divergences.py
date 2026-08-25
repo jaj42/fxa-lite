@@ -32,7 +32,7 @@ EXPECTED = {
     "acr-values-refused",
     "avatar-is-always-a-monogram",
     "batch-append-filters-id",
-    "device-commands-not-enabled",
+    "device-commands-always-empty",
     "devices-notify-not-enabled",
     "failed-login-throttle",
     "hawk-macs-unverified",

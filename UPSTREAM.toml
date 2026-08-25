@@ -46,10 +46,12 @@ paths = [
   # Its spec is the citation for what /account/devices/notify answers when the
   # deployment does not do device-driven notifications: 403, errno 202.
   "packages/fxa-auth-server/lib/routes/devices-and-sessions.spec.ts",
-  # The command queue itself, read for one thing: what every method does when
-  # the deployment has no pushbox (`enabled = false` — reject with
-  # featureNotEnabled), which is the citation for /account/device/commands
-  # answering 403 rather than an empty queue.
+  # The command queue itself, read twice and for opposite conclusions.  First
+  # for what every method does when the deployment has no pushbox (`enabled =
+  # false` — reject with featureNotEnabled), which is where the 403 on
+  # /account/device/commands came from; then, after that 403 turned out to
+  # crash Firefox for Android, for `PushboxDB.retrieve`, which computes the
+  # empty-queue document that replaced it — `index` 0, `last` true, no messages.
   "packages/fxa-auth-server/lib/pushbox",
   "packages/fxa-auth-server/lib/routes/emails.js",
   "packages/fxa-auth-server/lib/routes/oauth",
@@ -247,4 +249,44 @@ paths = [
   # item that renders either the address or "Sign in", and `AccountUiView.kt` as
   # the settings screen's version of the same decision.
   "patches/fenix-disable-sync-avatar-fetching.patch",
+]
+
+# Archived in June 2024: Fenix and android-components now live in the Firefox
+# monorepo, so this pin is the last state of a tree the phone no longer builds
+# from.  It is kept anyway, and its staleness stated rather than hidden, because
+# the two files that matter here — `Exceptions.kt` and `Utils.kt` — have carried
+# the same allow-list since long before the archive, and `scripts/upstream-diff.sh`
+# will report nothing for this repo forever.  Anything read from it that is load
+# bearing wants confirming against a handset or against mozilla-central; the
+# force-close it explains is confirmed by the phone having stopped crashing.
+[[repo]]
+dir = "firefox-android"
+url = "https://github.com/mozilla-mobile/firefox-android"
+branch = "main"
+commit = "fe8a71cd70ad5674abe1824fe11dc78372b736c2"
+date = "2024-06-17"
+took = "the Kotlin half of the answer to a force-close: which FxA errors android-components treats as recoverable, and which line of Fenix polls the route that raised one"
+paths = [
+  # `shouldPropagate()`: the allow-list of recoverable `FxaException`s, ending
+  # `else -> true`.  `Forbidden` is not on it and has no typealias here, which
+  # is why a 403 from /account/device/commands crashes the app rather than
+  # being swallowed the way the earlier 404 was.
+  "android-components/components/service/firefox-accounts/src/main/java/mozilla/components/service/fxa/Exceptions.kt",
+  # `handleFxaExceptions`, which asks `shouldPropagate()` before it decides
+  # anything — so the `default`/`handleErrorBlock` a caller passes never runs.
+  "android-components/components/service/firefox-accounts/src/main/java/mozilla/components/service/fxa/Utils.kt",
+  # `pollForCommands()`, the caller, and `refreshDevices()` next to it: the
+  # /account/devices then /account/device/commands pair seen in the server log.
+  "android-components/components/service/firefox-accounts/src/main/java/mozilla/components/service/fxa/FxaDeviceConstellation.kt",
+  # `authenticatedAccount()` returns the account for AuthenticationProblem as
+  # well as Authenticated — which is why the crash was not introduced by the
+  # profile fix, only made easy to reach.
+  "android-components/components/service/firefox-accounts/src/main/java/mozilla/components/service/fxa/manager/FxaAccountManager.kt",
+  # `SyncStoreSupport`: the early return that rendered a missing profile as
+  # "Sign in", which phase 13 read from a copy rather than from a checkout.
+  "android-components/components/service/firefox-accounts/src/main/java/mozilla/components/service/fxa/store/SyncStoreSupport.kt",
+  # `syncNow()`: `refreshDevices()` then `pollForCommands()`, inside
+  # `viewLifecycleOwner.lifecycleScope.launch` — the coroutine with no handler
+  # that the rethrown exception escapes from.  This is the *Sync now* button.
+  "fenix/app/src/main/java/org/mozilla/fenix/settings/account/AccountSettingsFragment.kt",
 ]

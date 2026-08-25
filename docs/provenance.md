@@ -62,12 +62,27 @@ parties it must not break, a client population it cannot re-derive. The risk in
 this group is interoperability, and it is what the conformance client and the
 real-Firefox runs are for.
 
-**Features that are off, answered in the protocol's own words** — the command
-queue, the push fan-out, registration. The temptation in each case was a 200
-that promises something impossible; the answer instead is upstream's own
-`featureNotEnabled`, 403 with errno 202, which is a value the client's error
-table already contains. The risk here is a client that reads the 403 as fatal
-rather than as absent, which is why none of them carries `retryAfter`.
+**Features that are off** — the command queue, the push fan-out, registration.
+The temptation in each case was a 200 that promises something impossible, and
+for two of the three the answer is upstream's own `featureNotEnabled`, 403 with
+errno 202, none of them carrying `retryAfter`.
+
+The named risk in this group was "a client that reads the 403 as fatal rather
+than as absent", and it happened. Firefox for Android polls the command queue,
+and the 403 crashed it: the Rust `fxa-client` maps every 403 to
+`FxaError::Forbidden` without reading errno at all, android-components'
+`shouldPropagate` allow-lists the exceptions it treats as recoverable and ends
+`else -> true`, and `Forbidden` is not on the list — so the poll rethrows out of
+the coroutine behind Fenix's *Sync now* button. The queue now answers the
+empty-queue document instead, which upstream's own `PushboxDB.retrieve` computes
+for a pushbox with nothing in it.
+
+The lesson is narrower than "do not use 403". errno 202 really is in the
+client's error table — the *JavaScript* client's. `/account/devices/notify`
+keeps the same 403 for the same feature, because the check that matters is not
+what the error table says but which client asks: `fxa-client`'s HTTP surface
+never posts to that route. "Answered in the protocol's own words" is a claim
+about a reader, so it has to name one.
 
 **Consequences of being one process** — the derived tokenserver secret, the real
 foreign key on Sync users, `/` belonging to the content server. These are not

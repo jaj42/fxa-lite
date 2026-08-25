@@ -118,18 +118,32 @@ def last_access_time(db: Database, device: Device) -> int:
     return device.created_at
 
 
-# DIVERGENCE: device-commands-not-enabled — the command queue answers 403/errno 202
+# DIVERGENCE: device-commands-always-empty — the command queue answers 200 and is never not empty
 #   upstream: reads the queue with `pushbox.retrieve` and returns the pending
-#     messages; with `config.pushbox.enabled = false` every pushbox method
-#     rejects with `featureNotEnabled`, which is 403 / errno 202.
-#   fxa-lite: always the latter. There is no pushbox and no `invoke_command`.
-#   why: the queue is not empty, it does not exist. An empty-queue 200 is the
-#     answer that never changes: it spends the client's polls telling it to ask
-#     again instead of telling it why. errno 202 is in the client's own error
-#     table; errno 116 (unknown endpoint) is not an answer about this feature.
-#   cost: Send Tab and the other device commands do not work, which is the
-#     out-of-scope list stated in the protocol's own words. `retryAfter` is
-#     deliberately absent — see `errors.feature_not_enabled`.
+#     messages. A deployment with `config.pushbox.enabled = false` gets
+#     `featureNotEnabled` — 403, errno 202 — from every pushbox method instead.
+#   fxa-lite: the empty-queue document, byte for byte what upstream's own
+#     `PushboxDB.retrieve` computes when no row matches: `{"index": 0, "last":
+#     true, "messages": []}`. There is no pushbox and no `invoke_command`, so
+#     no row can ever match.
+#   why: this route is polled by Firefox for Android, and the disabled-pushbox
+#     403 crashes it. `fxa-client` maps *any* 403 to `FxaError::Forbidden`
+#     (`components/fxa-client/src/error.rs`) without reading errno at all;
+#     android-components' `shouldPropagate` then allow-lists the errors it
+#     considers recoverable — Network, Authentication, Other, OriginMismatch,
+#     NoExistingAuthFlow — and ends `else -> true`, "throw on newly encountered
+#     exceptions". `Forbidden` is not on the list and has no typealias there, so
+#     `handleFxaExceptions` rethrows it out of the `lifecycleScope` coroutine
+#     that `AccountSettingsFragment.syncNow()` polls from, and the app dies.
+#     The errno argument that put the 403 here was a claim about the *JavaScript*
+#     client's error table; the client that asks is Rust, and it dispatches on
+#     the status alone.
+#   cost: what phase 8 refused, and it is real: this is the answer that never
+#     changes, and it spends a poll telling the client to ask again rather than
+#     telling it why. Send Tab and the other device commands do not work and
+#     nothing on the wire says so — a client can only learn it from
+#     `/account/devices`, where fxa-lite advertises no `availableCommands` of
+#     its own. That is the price of the route not being fatal.
 @router.get("/account/device/commands")
 def device_commands(
     request: Request,
@@ -137,42 +151,49 @@ def device_commands(
     index: int | None = Query(default=None),
     limit: int = Query(default=100, ge=0, le=100),
 ) -> dict[str, Any]:
-    """The receiving half of Send Tab — answered 403/errno 202, like a server with no pushbox.
+    """The receiving half of Send Tab — the empty queue, which is all it can be.
 
     Phase 8 predicted this route would never be asked for and was wrong: Firefox
-    for Android polls it (`?index=1`) once it has a device record, and until this
+    for Android polls it (`?index=1`) once it has a device record, and until it
     existed the answer was a 404 with errno 116, "unknown endpoint" — which is
-    only true of a server that has never heard of device commands, and says
-    nothing about why they are not coming.
+    only true of a server that has never heard of device commands.
 
     Commands do not travel by push. The sender enqueues with
     `POST /account/devices/invoke_command`, push is only the nudge, and the
     target picks the message up here; upstream's handler reads the queue with
-    `pushbox.retrieve`. fxa-lite has no pushbox and no `invoke_command`, so the
-    queue is not empty, it does not exist — and upstream has an answer for
-    precisely that deployment: with `config.pushbox.enabled = false` every
-    pushbox method rejects with `featureNotEnabled`, so this route 403s with
-    errno 202 while the rest of the device API keeps working.
+    `pushbox.retrieve`. fxa-lite has no pushbox and no `invoke_command`, so
+    nothing is ever enqueued — and the document for a queue with nothing in it
+    is one upstream computes rather than invents. `PushboxDB.retrieve` selects
+    no rows, so `maxIndex` is 0, `lastIndex` is `messages.at(-1)?.idx || 0` — 0
+    — and `last` is `lastIndex === maxIndex || maxIndex === 0 || !messages.length`,
+    true three times over. `{"index": 0, "last": true, "messages": []}` is what
+    a real pushbox with an empty table returns, not an approximation of it.
 
-    That last clause is why the other switch is the wrong one to copy.
-    `oauth.deviceCommandsEnabled = false` also 403s `GET /account/devices` for a
-    refresh-token caller — "the only reason a device calls this endpoint is to
-    get a list of other devices it can send commands to" — and Android's device
-    list has to keep answering.
+    **The 403 this route used to give is what crashes Firefox for Android**, and
+    it is worth writing down in full because the mistake was not the status but
+    the reasoning behind it. `fxa-client` maps every 403 to `FxaError::Forbidden`
+    (`error.rs`) and never reads errno; android-components' `shouldPropagate`
+    (`service/fxa/Exceptions.kt`) names the exceptions it treats as recoverable
+    — Network, Authentication, Other, OriginMismatch, NoExistingAuthFlow — and
+    ends `else -> true`, "throw on newly encountered exceptions". `Forbidden` is
+    not among them, so `handleFxaExceptions` rethrows, and the poll runs in the
+    `viewLifecycleOwner.lifecycleScope` coroutine of
+    `AccountSettingsFragment.syncNow()`, where nothing catches it. The user
+    presses Sync now and the app disappears. Note the direction: errno 116 was
+    *safer*, because `FxaError::Other` is on that allow-list.
 
-    The alternative was `200 {"index": 0, "last": true, "messages": []}`, which
-    is what an empty queue looks like and is not false: nothing is pending, and
-    nothing can be. It is rejected for the reason `devices_notify` rejects its
-    own 200 — it is the answer that never changes, and it spends the client's
-    polls telling it to ask again rather than telling it why. errno 202 is in
-    the client's error table (`auth-errors.js: FEATURE_NOT_ENABLED`); errno 116
-    is not an answer about this feature at all.
+    So the "answer in the protocol's own words" argument survives only where the
+    protocol and the client agree on which words those are. errno 202 is in the
+    JavaScript client's error table (`auth-errors.js: FEATURE_NOT_ENABLED`); the
+    client that polls this route is Rust, and it dispatches on the status alone.
 
-    `retryAfter` is absent, as it must be on any permanent 403 here — see
-    `errors.feature_not_enabled`. `index` and `limit` are declared but unread,
-    so that a malformed one is still the 400 upstream's query validation gives
-    rather than something this route invented; the queue behind them is what is
-    missing, not the vocabulary.
+    What is given up is what phase 8 named: this is the answer that never
+    changes, so the poll is spent telling the phone to ask again rather than
+    telling it why. That cost is paid to a client that is still running.
+
+    `index` and `limit` are declared but unread, so that a malformed one is
+    still the 400 upstream's query validation gives rather than something this
+    route invented; the queue behind them is what is missing, not the vocabulary.
 
     The unknown-device check comes first, because upstream's handler makes it
     before it touches pushbox: a caller with no device record of its own has
@@ -181,7 +202,7 @@ def device_commands(
     db: Database = database(request)
     if _current_device(db, credentials) is None:
         raise errors.unknown_device()
-    raise errors.feature_not_enabled()
+    return {"index": 0, "last": True, "messages": []}
 
 
 @router.post("/account/device/destroy")
@@ -204,6 +225,11 @@ def device_destroy(
 #   cost: a Sync write does not nudge the other devices, so they pick it up on
 #     their next poll instead of at once. Again with no `retryAfter`: a
 #     permanent 403 that carries one stalls the whole account client on a timer.
+#     The 403 survives here and not on `/account/device/commands` for one
+#     reason, checked rather than assumed: only Firefox Desktop posts this, in
+#     JavaScript, without awaiting the promise. `fxa-client`'s HTTP surface
+#     (`internal/http_client.rs`) has no call to `devices/notify` at all, so the
+#     client that a 403 is fatal to never reaches this route.
 @router.post("/account/devices/notify")
 def devices_notify(payload: DevicesNotify, credentials: DeviceAuth) -> dict[str, Any]:
     """Firefox's "the clients collection changed" nudge — answered 403/202.
@@ -227,6 +253,15 @@ def devices_notify(payload: DevicesNotify, credentials: DeviceAuth) -> dict[str,
     Nothing breaks either way: the caller does not await the promise and logs
     the rejection. What would break is a `retryAfter` on the answer — see
     `errors.feature_not_enabled`.
+
+    `/account/device/commands` gave the same 403 for the same reason and no
+    longer does, because it crashed Firefox for Android outright; the argument
+    is written out there. It does not reach this route. That is a fact about
+    the client and not about the status: `fxa-client`'s `http_client.rs` posts
+    to `devices/invoke_command` and never to `devices/notify`, so the only
+    caller is the desktop JavaScript above, which reads errno 202 as the error
+    table says. If a Rust caller ever appears here, this 403 becomes the same
+    bug and the answer becomes `{}`.
 
     Send Tab does not come through here. Current Firefox delivers commands with
     `POST /account/devices/invoke_command` and the target *polls*

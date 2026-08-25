@@ -1664,6 +1664,63 @@ phone made answered 200 — which is why this took a reading rather than a log.
 
 925 tests, `ruff check` and `ty check` clean.
 
+### Phase 14 — the 403 that closed the app ✅ done
+
+Reported from the household again, and again with no error on the wire: *Sync now* on the phone
+force-closed the browser. The server log ends on a clean pair of 200s and one 403, the same 403
+*The command queue that is not there* chose on purpose, at the end of phase 8.
+
+- **`GET /account/device/commands` answering 403 is what crashed it.** The chain is four files
+  long and every link is in `resources/` now. `AccountSettingsFragment.syncNow()` — the *Sync now*
+  button — is `viewLifecycleOwner.lifecycleScope.launch { syncNow(); refreshDevices();
+  pollForCommands() }`, which is exactly the `/account/devices` then `/account/device/commands`
+  adjacency in the log. `pollForCommands()` wraps the call in `handleFxaExceptions`, which asks
+  `shouldPropagate()` *before* it decides anything. `fxa-client` maps every 403 to
+  `FxaError::Forbidden` (`error.rs`) and never reads errno. And `shouldPropagate()`
+  (`service/fxa/Exceptions.kt`) is an allow-list — Network, Authentication, Other, OriginMismatch,
+  NoExistingAuthFlow — ending `else -> true`, "throw on newly encountered exceptions". `Forbidden`
+  is not on it and has no typealias in android-components, so the exception is rethrown into a
+  coroutine with no handler.
+- **The direction is the surprising part: errno 116 was safer.** A 404 became
+  `FxaError::Other` → `FxaUnspecifiedException`, which is explicitly on the recoverable list and
+  was swallowed. The 404 was replaced with a fatal answer, and the prose was improved while it
+  happened.
+- **The reasoning that failed was "answered in the protocol's own words".** It is a good rule and
+  it was applied to the wrong reader. errno 202 is in the client's error table —
+  `auth-errors.js`, the *JavaScript* client's. The client that polls this route is the Rust crate
+  every mobile build embeds, and it dispatches on the HTTP status alone. A claim that an answer is
+  legible has to name who is reading.
+- **The route now answers the empty queue,** which phase 8 considered and rejected:
+  `{"index": 0, "last": true, "messages": []}`. That document is not invented for the occasion —
+  it is what upstream's own `PushboxDB.retrieve` computes when no row matches (`maxIndex` 0,
+  `lastIndex = messages.at(-1)?.idx || 0`, and `last` true by three of its clauses at once), so a
+  real pushbox with an empty table sends the same bytes. The client agrees from the other side:
+  `fetch_and_parse_commands` returns early on empty `messages` and never reads `index`, so
+  `last_handled_command_index` is left alone. That objection stands and is simply outranked
+  — this is the answer that never changes, and the poll is spent saying "ask again" rather than
+  saying why, which is a cost paid to a client that is still running.
+- **`/account/devices/notify` keeps its 403,** and the reason is checked rather than assumed:
+  `fxa-client`'s `http_client.rs` posts to `devices/invoke_command` and has no call to
+  `devices/notify` at all. The only caller is Firefox Desktop's JavaScript, which does read the
+  error table, and does not await the promise. If a Rust caller ever appears there, that 403 is
+  the same bug and the answer becomes `{}`.
+- **What this cost, and what it did not.** Nothing else in the device API moves; Send Tab was and
+  remains out of scope, and its absence is now unstated rather than misstated. A client can still
+  learn it from `/account/devices`, where fxa-lite advertises no `availableCommands` of its own.
+- **`UPSTREAM.toml` gains `firefox-android`** at `fe8a71cd`, with the five files above. The entry
+  carries a warning the others do not need: the repository was archived in June 2024 and Fenix
+  now lives in the Firefox monorepo, so `scripts/upstream-diff.sh` will report nothing for it
+  forever. It is pinned anyway, because the alternative is a claim about Kotlin with no checkout
+  behind it, and the two files that carry the argument have held the same allow-list since long
+  before the archive.
+- **What this says about phase 13's rule.** Phase 13 narrowed phase 8's — *a trace establishes
+  what was asked for, not what was understood* — and this phase pays the second half of that
+  bill. The trace showed a 403 that was deliberate and correct against upstream's configuration;
+  the reading that was missing was of the client's error *handling*, one layer above the parser
+  phase 13 read. Both times the server was right and the household was the instrument.
+
+946 tests, `ruff check` and `ty check` clean.
+
 ---
 
 ## Verification
@@ -1692,8 +1749,9 @@ Email/SMTP entirely, password reset and recovery keys, TOTP/2FA/recovery codes/p
 sign-in unblock and the customs/rate-limit server (phase 10 reprices that last one as a
 denial-of-service question, not a feature), subscriptions and payments, push
 notifications and Send Tab, QR pairing (the channelserver), device commands — which mobile polls
-for, so the queue's absence is now stated in the protocol's own words, 403/errno 202, rather than
-as a 404 — metrics/Glean/Sentry,
+for, so the queue answers as an empty queue: the absence is real but it is not reported, because
+the two ways of reporting it were a 404 the client did not understand and a 403 that closed the
+app (phase 14) — metrics/Glean/Sentry,
 the admin panel, and BrowserID (`/certificate/sign` is gone from the reference too — note that
 the `fxa-credentials` grant is *not* BrowserID, despite upstream naming its payload field
 `assertion`; see phase 3).

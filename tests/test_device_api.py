@@ -432,54 +432,75 @@ async def test_a_phone_cannot_claim_another_devices_row(
     assert caught.value.errno == 124
 
 
-# -- the command queue that is not there -------------------------------------
+# -- the command queue that is always empty ----------------------------------
 #
 # `GET /account/device/commands` is the receiving half of Send Tab: the sender
 # enqueues with `invoke_command`, push is only a nudge, and the target polls
 # here. Phase 8 recorded that the phone had never asked for it; it does — with
 # `?index=1`, once it has a device record — and a 404/errno 116 was the wrong
-# thing to tell it. fxa-lite has no pushbox, which upstream spells
-# `config.pushbox.enabled = false`: every pushbox method rejects with
-# `featureNotEnabled`, so the route answers 403/errno 202 and the rest of the
-# device API is untouched.
+# thing to tell it. So was the 403/errno 202 that replaced it, which is the
+# answer upstream gives a deployment with `config.pushbox.enabled = false` and
+# is the answer that crashes Firefox for Android: `fxa-client` maps any 403 to
+# `FxaError::Forbidden`, android-components' `shouldPropagate` does not list
+# that among the recoverable ones, and `AccountSettingsFragment.syncNow()` polls
+# from a coroutine with no handler. The answer is the empty-queue document —
+# what upstream's own `PushboxDB.retrieve` computes when no row matches.
 
 
-async def test_device_commands_is_refused_as_a_feature_this_server_lacks(
-    bearer_client: AuthClient,
-) -> None:
+async def test_device_commands_is_the_empty_queue(bearer_client: AuthClient) -> None:
     account = await bearer_client.sign_up(EMAIL, PASSWORD)
     await bearer_client.device_register(account["sessionToken"], {"name": "Laptop"})
-    with pytest.raises(ClientError) as caught:
-        await bearer_client.device_commands(account["sessionToken"], index=1)
-    assert caught.value.status == 403
-    assert caught.value.errno == 202
+    result = await bearer_client.device_commands(account["sessionToken"], index=1)
+    assert result == {"index": 0, "last": True, "messages": []}
 
 
-async def test_device_commands_from_a_phone_is_the_request_that_404d(
+async def test_device_commands_from_a_phone_is_the_poll_that_crashed_it(
     bearer_client: AuthClient, phone: str
 ) -> None:
-    """The exact poll from the trace: `Bearer <refresh token>`, `?index=1`."""
-    await bearer_client.device_register(phone, {"name": "Phone"}, kind="refreshToken")
-    with pytest.raises(ClientError) as caught:
-        await bearer_client.device_commands(phone, kind="refreshToken", index=1)
-    assert caught.value.status == 403
-    assert caught.value.errno == 202
+    """The exact poll from the trace: `Bearer <refresh token>`, `?index=1`.
 
-
-async def test_device_commands_never_asks_the_client_to_back_off(
-    bearer_client: AuthClient, phone: str
-) -> None:
-    """Mobile polls this route, so a `retryAfter` here would stall the account
-    client on a permanently repeating timer — the assertion `devices_notify`
-    makes, for the same reason and a busier route."""
+    This is the regression guard for the force-close. Any 4xx here is a crash on
+    the handset, because the client reads the status and not the errno: 403 is
+    `FxaError::Forbidden`, which `shouldPropagate` rethrows out of the
+    `lifecycleScope` coroutine that polls, and the app dies with the user's
+    finger still on *Sync now*.
+    """
     await bearer_client.device_register(phone, {"name": "Phone"}, kind="refreshToken")
     response = await bearer_client.http.get(
         "/v1/account/device/commands?index=1",
         headers=bearer_client.authorization(phone, "refreshToken"),
     )
-    assert response.status_code == 403
-    assert "retryAfter" not in response.json()
-    assert "retry-after" not in response.headers
+    assert response.status_code == 200
+    assert response.json() == {"index": 0, "last": True, "messages": []}
+
+
+async def test_device_commands_answers_every_index_the_same_way(
+    bearer_client: AuthClient, phone: str
+) -> None:
+    """`index` is echoed by nobody: upstream returns the index of the last
+    message it found, which for an empty queue is 0 whatever was asked for
+    (`PushboxDB.retrieve`: `messages.at(-1)?.idx || 0`).  The client agrees —
+    `fetch_and_parse_commands` returns early on empty `messages` and never reads
+    the field, so `last_handled_command_index` is left where it was."""
+    await bearer_client.device_register(phone, {"name": "Phone"}, kind="refreshToken")
+    for index in (1, 2, 4096):
+        result = await bearer_client.device_commands(
+            phone, kind="refreshToken", index=index
+        )
+        assert result == {"index": 0, "last": True, "messages": []}
+
+
+async def test_device_commands_carries_the_three_keys_the_client_deserialises(
+    bearer_client: AuthClient, phone: str
+) -> None:
+    """`PendingCommandsResponse` is a Rust struct: `index: u64` is required,
+    `last: Option<bool>`, `messages: Vec<PendingCommand>`.  A missing `index`
+    fails the parse the way the profile's missing `avatar` did."""
+    await bearer_client.device_register(phone, {"name": "Phone"}, kind="refreshToken")
+    result = await bearer_client.device_commands(phone, kind="refreshToken", index=1)
+    assert isinstance(result["index"], int)
+    assert isinstance(result["last"], bool)
+    assert isinstance(result["messages"], list)
 
 
 async def test_device_commands_needs_a_device_of_its_own(
@@ -495,8 +516,8 @@ async def test_device_commands_needs_a_device_of_its_own(
 
 
 async def test_device_commands_needs_a_credential(bearer_client: AuthClient) -> None:
-    """As with notify: a 403 is a statement about this server, and an
-    anonymous caller is owed nothing but 110."""
+    """The empty queue is a statement about an account, and an anonymous caller
+    has not named one: 110, before anything about the queue is decided."""
     with pytest.raises(ClientError) as caught:
         await bearer_client.device_commands("a" * 64, index=1)
     assert caught.value.errno == 110
@@ -507,7 +528,7 @@ async def test_device_commands_still_validates_its_query(
     bearer_client: AuthClient, phone: str, query: str
 ) -> None:
     """`index` and `limit` are unread but declared, so a malformed one is the
-    400 upstream's joi layer gives rather than a 403 about the feature."""
+    400 upstream's joi layer gives rather than a 200 that ignored it."""
     await bearer_client.device_register(phone, {"name": "Phone"}, kind="refreshToken")
     response = await bearer_client.http.get(
         f"/v1/account/device/commands?{query}",
