@@ -46,6 +46,11 @@ paths = [
   # Its spec is the citation for what /account/devices/notify answers when the
   # deployment does not do device-driven notifications: 403, errno 202.
   "packages/fxa-auth-server/lib/routes/devices-and-sessions.spec.ts",
+  # The command queue itself, read for one thing: what every method does when
+  # the deployment has no pushbox (`enabled = false` — reject with
+  # featureNotEnabled), which is the citation for /account/device/commands
+  # answering 403 rather than an empty queue.
+  "packages/fxa-auth-server/lib/pushbox",
   "packages/fxa-auth-server/lib/routes/emails.js",
   "packages/fxa-auth-server/lib/routes/oauth",
   # attached_clients, plus the spec whose fixture is transcribed as its KAT.

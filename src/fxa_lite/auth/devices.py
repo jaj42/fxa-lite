@@ -118,6 +118,60 @@ def last_access_time(db: Database, device: Device) -> int:
     return device.created_at
 
 
+@router.get("/account/device/commands")
+def device_commands(
+    request: Request,
+    credentials: DeviceAuth,
+    index: int | None = Query(default=None),
+    limit: int = Query(default=100, ge=0, le=100),
+) -> dict[str, Any]:
+    """The receiving half of Send Tab — answered 403/errno 202, like a server with no pushbox.
+
+    Phase 8 predicted this route would never be asked for and was wrong: Firefox
+    for Android polls it (`?index=1`) once it has a device record, and until this
+    existed the answer was a 404 with errno 116, "unknown endpoint" — which is
+    only true of a server that has never heard of device commands, and says
+    nothing about why they are not coming.
+
+    Commands do not travel by push. The sender enqueues with
+    `POST /account/devices/invoke_command`, push is only the nudge, and the
+    target picks the message up here; upstream's handler reads the queue with
+    `pushbox.retrieve`. fxa-lite has no pushbox and no `invoke_command`, so the
+    queue is not empty, it does not exist — and upstream has an answer for
+    precisely that deployment: with `config.pushbox.enabled = false` every
+    pushbox method rejects with `featureNotEnabled`, so this route 403s with
+    errno 202 while the rest of the device API keeps working.
+
+    That last clause is why the other switch is the wrong one to copy.
+    `oauth.deviceCommandsEnabled = false` also 403s `GET /account/devices` for a
+    refresh-token caller — "the only reason a device calls this endpoint is to
+    get a list of other devices it can send commands to" — and Android's device
+    list has to keep answering.
+
+    The alternative was `200 {"index": 0, "last": true, "messages": []}`, which
+    is what an empty queue looks like and is not false: nothing is pending, and
+    nothing can be. It is rejected for the reason `devices_notify` rejects its
+    own 200 — it is the answer that never changes, and it spends the client's
+    polls telling it to ask again rather than telling it why. errno 202 is in
+    the client's error table (`auth-errors.js: FEATURE_NOT_ENABLED`); errno 116
+    is not an answer about this feature at all.
+
+    `retryAfter` is absent, as it must be on any permanent 403 here — see
+    `errors.feature_not_enabled`. `index` and `limit` are declared but unread,
+    so that a malformed one is still the 400 upstream's query validation gives
+    rather than something this route invented; the queue behind them is what is
+    missing, not the vocabulary.
+
+    The unknown-device check comes first, because upstream's handler makes it
+    before it touches pushbox: a caller with no device record of its own has
+    asked about a queue that could not exist even here.
+    """
+    db: Database = database(request)
+    if _current_device(db, credentials) is None:
+        raise errors.unknown_device()
+    raise errors.feature_not_enabled()
+
+
 @router.post("/account/device/destroy")
 def device_destroy(
     payload: DeviceDestroy, request: Request, credentials: DeviceAuth

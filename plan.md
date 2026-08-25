@@ -917,9 +917,11 @@ which keeps the scheme and eight characters — visible in the trace that starte
 **And with those two, Android syncs.** Nothing else was missing: device registration was the last
 thing between "Signed In" and an active account, and the routes this phase kept expecting to need
 next were never asked for. `GET /account/device/commands` in particular is on upstream's
-refresh-token list and mobile is said to poll it, and it has not been requested once — which is
-the phase's own rule vindicated rather than a gap. Send Tab is the feature that would ask, and it
-is not in scope.
+refresh-token list and mobile is said to poll it, and it had not been requested once — which read
+at the time as the phase's own rule vindicated rather than as a gap. ~~Send Tab is the feature
+that would ask, and it is not in scope.~~ **That last sentence was wrong, and a longer run of the
+phone proved it — see "The command queue that is not there" below.** The rule survives the
+correction, and so does its point: what changed is that the trace ran long enough to ask.
 
 830 tests, `ruff check` and `ty check` clean.
 
@@ -967,6 +969,43 @@ is the only way to write them:
    and it found nothing to fix. One assertion about control flow became a test on the way past:
    the schema-v4 unique index cannot be reached by a second write, because the device-conflict
    check refuses it first.
+
+**The command queue that is not there — `GET /account/device/commands`, which was a 404.** Once
+the phone had run for a while against fxa-lite it started polling
+`GET /v1/account/device/commands?index=1` with its refresh token, and got errno 116, "unknown
+endpoint". Phase 8 had closed by saying the route had not been requested once and that only Send
+Tab would ask; the first half was a true observation of a short trace and the second half was a
+guess, and Fenix polls the queue whether or not anything has ever been sent to it.
+
+- **What the route is.** Commands do not travel by push. The sender enqueues with
+  `POST /account/devices/invoke_command`, push is only a nudge, and the target polls here; the
+  handler reads the queue with `pushbox.retrieve`. fxa-lite has no pushbox and does not serve
+  `invoke_command`, so the queue is not momentarily empty — it does not exist.
+- **The answer is 403/errno 202,** for the third time in this file and by the same argument.
+  Upstream has a configuration that means exactly what fxa-lite means: with
+  `config.pushbox.enabled = false` every pushbox method rejects with `featureNotEnabled`, so this
+  route 403s and nothing else in the device API moves. The `retryAfter` is absent as always —
+  more pressingly here than on notify, because this is a route mobile *polls*, and a permanent
+  timer refreshed on every poll would stall the whole account client.
+- **The other switch would have been the wrong one to copy.**
+  `oauth.deviceCommandsEnabled = false` reaches further than its name: it also 403s
+  `GET /account/devices` for a refresh-token caller, on the reasoning that "the only reason a
+  device calls this endpoint is to get a list of other devices it can send commands to". Android's
+  device list has to keep answering, so the pushbox switch is the one that describes us.
+- **The rejected alternative was `200 {"index": 0, "last": true, "messages": []}`** — what an
+  empty queue looks like, and not false, since nothing is pending and nothing can be. It loses on
+  the same ground the 200 lost on notify: it is the answer that never changes, and it spends the
+  client's polls saying "ask again" instead of saying why. errno 202 is in the client's own error
+  table; errno 116 is not an answer about this feature at all.
+- **`index` and `limit` are declared and unread.** The query validation is upstream's
+  (`limit` 0–100), so a malformed one is still the 400 it has always been rather than a 403 about
+  the feature. What is missing is the queue, not the vocabulary. The unknown-device check comes
+  first for the same reason it does upstream: a caller with no device record has asked about a
+  queue that could not have existed even here.
+
+`invoke_command` is still a 404 and Send Tab is still out of scope — but the two are one feature,
+and if the sending half is ever answered it should be answered in the same voice as this one.
+838 tests, `ruff check` and `ty check` clean.
 
 ### Phase 9 — harden `crypto/jose.py` ✅ done
 
@@ -1512,7 +1551,9 @@ do both by half.
 Email/SMTP entirely, password reset and recovery keys, TOTP/2FA/recovery codes/passkeys,
 sign-in unblock and the customs/rate-limit server (phase 10 reprices that last one as a
 denial-of-service question, not a feature), subscriptions and payments, push
-notifications and Send Tab, QR pairing (the channelserver), device commands, metrics/Glean/Sentry,
+notifications and Send Tab, QR pairing (the channelserver), device commands — which mobile polls
+for, so the queue's absence is now stated in the protocol's own words, 403/errno 202, rather than
+as a 404 — metrics/Glean/Sentry,
 the admin panel, and BrowserID (`/certificate/sign` is gone from the reference too — note that
 the `fxa-credentials` grant is *not* BrowserID, despite upstream naming its payload field
 `assertion`; see phase 3).

@@ -430,3 +430,88 @@ async def test_a_phone_cannot_claim_another_devices_row(
         )
     assert caught.value.status == 400
     assert caught.value.errno == 124
+
+
+# -- the command queue that is not there -------------------------------------
+#
+# `GET /account/device/commands` is the receiving half of Send Tab: the sender
+# enqueues with `invoke_command`, push is only a nudge, and the target polls
+# here. Phase 8 recorded that the phone had never asked for it; it does — with
+# `?index=1`, once it has a device record — and a 404/errno 116 was the wrong
+# thing to tell it. fxa-lite has no pushbox, which upstream spells
+# `config.pushbox.enabled = false`: every pushbox method rejects with
+# `featureNotEnabled`, so the route answers 403/errno 202 and the rest of the
+# device API is untouched.
+
+
+async def test_device_commands_is_refused_as_a_feature_this_server_lacks(
+    bearer_client: AuthClient,
+) -> None:
+    account = await bearer_client.sign_up(EMAIL, PASSWORD)
+    await bearer_client.device_register(account["sessionToken"], {"name": "Laptop"})
+    with pytest.raises(ClientError) as caught:
+        await bearer_client.device_commands(account["sessionToken"], index=1)
+    assert caught.value.status == 403
+    assert caught.value.errno == 202
+
+
+async def test_device_commands_from_a_phone_is_the_request_that_404d(
+    bearer_client: AuthClient, phone: str
+) -> None:
+    """The exact poll from the trace: `Bearer <refresh token>`, `?index=1`."""
+    await bearer_client.device_register(phone, {"name": "Phone"}, kind="refreshToken")
+    with pytest.raises(ClientError) as caught:
+        await bearer_client.device_commands(phone, kind="refreshToken", index=1)
+    assert caught.value.status == 403
+    assert caught.value.errno == 202
+
+
+async def test_device_commands_never_asks_the_client_to_back_off(
+    bearer_client: AuthClient, phone: str
+) -> None:
+    """Mobile polls this route, so a `retryAfter` here would stall the account
+    client on a permanently repeating timer — the assertion `devices_notify`
+    makes, for the same reason and a busier route."""
+    await bearer_client.device_register(phone, {"name": "Phone"}, kind="refreshToken")
+    response = await bearer_client.http.get(
+        "/v1/account/device/commands?index=1",
+        headers=bearer_client.authorization(phone, "refreshToken"),
+    )
+    assert response.status_code == 403
+    assert "retryAfter" not in response.json()
+    assert "retry-after" not in response.headers
+
+
+async def test_device_commands_needs_a_device_of_its_own(
+    bearer_client: AuthClient, phone: str
+) -> None:
+    """Upstream checks `credentials.deviceId` before it touches pushbox: a
+    caller with no device record has asked about a queue that could not exist
+    even on a server that had one."""
+    with pytest.raises(ClientError) as caught:
+        await bearer_client.device_commands(phone, kind="refreshToken", index=1)
+    assert caught.value.status == 400
+    assert caught.value.errno == 123
+
+
+async def test_device_commands_needs_a_credential(bearer_client: AuthClient) -> None:
+    """As with notify: a 403 is a statement about this server, and an
+    anonymous caller is owed nothing but 110."""
+    with pytest.raises(ClientError) as caught:
+        await bearer_client.device_commands("a" * 64, index=1)
+    assert caught.value.errno == 110
+
+
+@pytest.mark.parametrize("query", ["limit=101", "limit=-1", "index=soon"])
+async def test_device_commands_still_validates_its_query(
+    bearer_client: AuthClient, phone: str, query: str
+) -> None:
+    """`index` and `limit` are unread but declared, so a malformed one is the
+    400 upstream's joi layer gives rather than a 403 about the feature."""
+    await bearer_client.device_register(phone, {"name": "Phone"}, kind="refreshToken")
+    response = await bearer_client.http.get(
+        f"/v1/account/device/commands?{query}",
+        headers=bearer_client.authorization(phone, "refreshToken"),
+    )
+    assert response.status_code == 400
+    assert response.json()["errno"] == 107

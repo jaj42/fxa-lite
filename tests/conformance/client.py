@@ -34,7 +34,7 @@ import struct
 import time
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from cryptography.exceptions import InvalidSignature
@@ -488,6 +488,25 @@ class AuthClient:
         self, token: str, payload: dict[str, Any], kind: str = "sessionToken"
     ) -> Any:
         return await self.authed("POST", "/account/devices/notify", token, kind, payload)
+
+    async def device_commands(
+        self,
+        token: str,
+        kind: str = "sessionToken",
+        *,
+        index: int | None = None,
+        limit: int | None = None,
+    ) -> Any:
+        """`deviceCommandsWithRefreshToken` — the poll Firefox for Android makes."""
+        query = {
+            name: value
+            for name, value in (("index", index), ("limit", limit))
+            if value is not None
+        }
+        path = "/account/device/commands"
+        if query:
+            path += "?" + urlencode(query)
+        return await self.authed("GET", path, token, kind)
 
     async def device_destroy(
         self, token: str, device_id: str, kind: str = "sessionToken"
