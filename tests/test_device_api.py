@@ -408,3 +408,25 @@ async def test_a_grant_that_may_not_manage_devices(db, signing_keys) -> None:
             )
     assert caught.value.status == 401
     assert caught.value.errno == 110
+
+
+async def test_a_phone_cannot_claim_another_devices_row(
+    bearer_client: AuthClient, phone: str
+) -> None:
+    """The conflict check is what keeps `devices_refresh_token_id` unique.
+
+    A refresh token that already owns a record and then names a *different* one
+    is `device_session_conflict`, not an upsert — which matters more than it
+    reads: without it the second write would put one refresh token on two rows
+    and the schema-v4 index would answer a client with a 500.
+    """
+    account = await bearer_client.sign_in(EMAIL, PASSWORD)
+    laptop = await bearer_client.device_register(account["sessionToken"], {"name": "Laptop"})
+    await bearer_client.device_register(phone, {"name": "Phone"}, kind="refreshToken")
+
+    with pytest.raises(ClientError) as caught:
+        await bearer_client.device_register(
+            phone, {"id": laptop["id"], "name": "Mine now"}, kind="refreshToken"
+        )
+    assert caught.value.status == 400
+    assert caught.value.errno == 124

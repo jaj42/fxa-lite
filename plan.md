@@ -660,7 +660,7 @@ As built:
   time but not all of it, and the test failed about one run in three. It now freezes the
   storage app's clock instead of hoping, because a test that asserts a conflict has to cause one.
 
-### Phase 8 — real Firefox
+### Phase 8 — real Firefox ✅ done
 Fresh profile, `about:config`:
 ```
 identity.fxaccounts.autoconfig.uri   = https://<host>/
@@ -693,7 +693,9 @@ its redirects, and the content server already serves that path, so nothing in fx
 changing — which is a hypothesis, not a result, until a phone has synced.
 
 Four things this phase has to establish, because the docs cannot be written from a reading of the
-source and each one is a sentence in phase 12:
+source and each one is a sentence in phase 12. **None of the four were answered** — Android syncs
+without them being settled, so they went to phase 12 unanswered rather than blocking this one; see
+the closing note at the end of the phase:
 
 - whether the *Custom Sync server* field is needed at all, given that our discovery document
   already advertises `sync_tokenserver_base_url` — if the app prefers discovery when the override
@@ -912,31 +914,41 @@ is a revocation capability and not an access one, which is the same trade upstre
 The refresh token arriving in an `Authorization` header is covered by `render_authorization`,
 which keeps the scheme and eight characters — visible in the trace that started this section.
 
-**Still open on Android**, and none of it observable until the phone runs again: the four questions
-at the top of this phase, and whether anything else is missing after device registration succeeds.
-`GET /account/device/commands` is the likeliest candidate — it is on upstream's refresh-token list
-and mobile polls it — but nothing has asked for it yet, and phase 8's rule is that a route is added
-when a trace asks for it.
+**And with those two, Android syncs.** Nothing else was missing: device registration was the last
+thing between "Signed In" and an active account, and the routes this phase kept expecting to need
+next were never asked for. `GET /account/device/commands` in particular is on upstream's
+refresh-token list and mobile is said to poll it, and it has not been requested once — which is
+the phase's own rule vindicated rather than a gap. Send Tab is the feature that would ask, and it
+is not in scope.
 
-829 tests, `ruff check` and `ty check` clean.
+830 tests, `ruff check` and `ty check` clean.
 
-**Still to do, in the order that makes sense:**
+**What the phase closes on, and what it hands to phase 12.** Both browsers sign in and sync:
+Firefox Desktop on Linux, and Firefox for Android against the same origin over TLS. That is the
+bar this phase set, and it is met. Two things it hoped to establish are not established, and
+neither is a code question — they are sentences the README needs and a phone or a fresh profile
+is the only way to write them:
 
-1. Re-run the desktop pass on a **fresh profile** against a clean database. Everything above was
-   observed on a profile that had already failed several sign-ins, so the happy path has been
-   seen in recovery, not from zero. This is also what confirms `attached_clients`: answering 200
-   is not the same as Firefox being satisfied with what is in the answer, and the trace is the
+1. The desktop pass has never been run on a **fresh profile** against a clean database.
+   Everything above was observed on a profile that had already failed several sign-ins, so the
+   happy path has been
+   seen in recovery, not from zero. This is also what would confirm `attached_clients`: answering
+   200 is not the same as Firefox being satisfied with what is in the answer, and the trace is the
    only place that shows the difference. The two `GET /storage/meta/global` 404s at the top of a
    first sync are not a defect and should stay: an absent BSO is Weave code 0, and Firefox reads
    the 404 as "this is a fresh server", wipes it and uploads `meta/global` and `crypto/keys`. It
-   asks twice because `_remoteSetup` re-fetches after `_freshStart`. On the fresh-profile run the
-   whole pair should appear once and never again.
-2. Re-run the Fenix pass now that `/v1/destroy` and refresh-token device auth are there. Sign-in
-   itself is established — the TLS origin unblocked it, which is why phase 11's proxy work landed
-   early — and the trace stopped at device registration; what happens *after* it succeeds has
-   never been seen. The four questions at the top of this phase are still unanswered, because
-   answering them needs a phone that syncs and not merely one that signs in. iOS likewise, and
-   still not attempted.
+   asks twice because `_remoteSetup` re-fetches after `_freshStart`. On a fresh-profile run the
+   whole pair should appear once and never again — which is a prediction, and the reason to make
+   the run.
+2. **The four questions at the top of this phase are still unanswered**, and they are phase 12's
+   problem now rather than this one's. Android syncs, which is what phase 8 owed; what nobody
+   wrote down on the way is whether *Custom Sync server* is needed alongside the account-server
+   field or whether discovery covers it, what the fields do to an already-signed-in profile,
+   whether *Use New React Mozilla Account page* moves the app off the paths `PAGE_PATHS` serves,
+   and whether Firefox for iOS can be pointed at a custom server at all. The first three are one
+   session with the phone in hand; the fourth may well end in "it cannot", which is a documented
+   answer and not a failure. **iOS has not been attempted**, and the README should not imply
+   otherwise merely because `1b1a3e44c54fbb58` is in the client registry.
 
    **This is what decides the order of the remaining phases.** Phase 10 opens with "the code is
    complete… so there is a fixed target to audit", and the mobile pass is the most likely source
@@ -950,11 +962,11 @@ when a trace asks for it.
    **How it actually went, recorded because the prediction was half right.** Phases 9, 10 and 11
    all landed before a phone was pointed at anything, and the mobile pass then did exactly what
    this paragraph said it would: two new routes, a new auth scheme and a schema migration, all
-   after the audit. So **the refresh-token scheme, `/v1/destroy` and schema v4 have not been
-   through phase 10** — `ruff`'s `S` rules and the `SECRET_KEYS` check above are what they have
-   had. Whatever closes phase 8 should re-run the audit over the diff rather than over the whole
-   tree; that is a much smaller job than the first pass, and it is the item this paragraph was
-   trying to avoid having to write.
+   after the audit. That diff has now been re-read against phase 10's own categories — the
+   **Addendum** at the end of `AUDIT.md` — which is the small job this paragraph was arguing for,
+   and it found nothing to fix. One assertion about control flow became a test on the way past:
+   the schema-v4 unique index cannot be reached by a second write, because the device-conflict
+   check refuses it first.
 
 ### Phase 9 — harden `crypto/jose.py` ✅ done
 
@@ -1429,8 +1441,11 @@ dependency group — never a runtime dependency):
   else: the desktop `about:config` prefs, and — the half that is missing from every self-hosting
   write-up including this plan until now — Fenix's Sync Debug fields, with the secret-menu route to
   them and the origin-versus-full-URL asymmetry between the two called out, since that is where the
-  attempt fails. Whatever phase 8 establishes about the optional sync field, the sign-out
-  requirement and iOS lands here as instructions. A short version of this table goes in the README
+  attempt fails. Phase 8 established none of the four questions it set itself —
+  the optional sync field, the sign-out requirement, the React page's paths, and iOS — because
+  Android synced without any of them being settled, so **establishing them is work this phase
+  inherits rather than prose it transcribes**. Three of them are one session with a phone; the
+  fourth may end in "iOS cannot be pointed at a custom server", which is an answer worth printing. A short version of this table goes in the README
   as well — the question "what do I type into my phone" arrives before anyone opens the docs — so
   include it from one source rather than writing it twice.
 - *Architecture.* The prefix table above, the six tiers and why they are one process, the schema

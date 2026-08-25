@@ -27,12 +27,15 @@ Phase 11 shipped the container deliverables — `Dockerfile`, `docker-compose.ya
 with an opt-in `tls` profile, `deploy/nginx.conf.example` and a smoke script that
 drives the whole bootstrap against a built image.
 
-Phase 8 is under way, and Firefox Desktop now signs in and syncs against it for
-real: tokenserver, `meta/global`, `crypto/keys`, and uploads of clients, prefs,
-tabs, bookmarks, addons and history. The desktop settings below are what has
-been seen to work, not what the code implies. The Android settings are still
-the latter — no phone has synced yet — and they need TLS first, because the
-sign-in page needs a secure context (see below).
+Phase 8 is done: **Firefox Desktop and Firefox for Android both sign in and sync
+against it for real** — tokenserver, `meta/global`, `crypto/keys`, and uploads of
+clients, prefs, tabs, bookmarks, addons and history. Everything in *Pointing a
+browser at it* below is what has been seen to work rather than what the code
+implies, with one gap named where it appears: on Android nobody has isolated
+whether *Custom Sync server* is required or whether the account origin's
+discovery document covers it, so both fields are still the instruction. A phone
+needs TLS before any of it, because the sign-in page needs a secure context
+(see below). Firefox for iOS remains untested.
 
 ## Usage
 
@@ -147,6 +150,8 @@ field is an **origin**, and the app reads the same discovery document from it
 that desktop does, while the sync field is a **full tokenserver URL** with the
 `/1.0/sync/1.5` on the end. Leave *Custom Push server* empty — push
 notifications are out of scope — and set both fields before signing in.
+Discovery already advertises `sync_tokenserver_base_url`, so the second field
+may well be redundant; that has not been tested, and setting it costs nothing.
 
 Firefox for iOS is registered as an OAuth client, but whether a shipping build
 can be pointed at a custom server is untested; assume for now that it cannot.

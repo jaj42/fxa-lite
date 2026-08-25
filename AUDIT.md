@@ -162,3 +162,40 @@ All five are in the README's **Security** section, under *Accepted, with the rea
   would fail verification. No shipping client uses such an id (Sync ids are GUIDs and base64url),
   and MAC and routing read the same decoded string, so there is no escalation — an interop edge,
   not a security one.
+
+## Addendum — the refresh-token auth scheme, audited after the fact
+
+The audit above ran at `a9001dd`, before a phone had ever been pointed at fxa-lite. Phase 8's
+mobile half then added a third auth scheme, two routes and a schema migration (`48a2654`), which
+is precisely the sequence the plan warned about. This is that diff re-read against the categories
+above; it is a diff review, not a second pass over the tree.
+
+**Nothing new to fix.** What was checked, and why each one is the question worth asking:
+
+- **The new scheme cannot escalate into an old one, in either direction.** `Bearer <64 hex>` with
+  no prefix resolves only through `refresh_credentials`; `_bearer_id` still demands the `fx*_`
+  prefix per token kind, so a refresh token cannot reach a session-token route. The reverse needs
+  a SHA-256 preimage: refresh tokens are looked up under `hash_token`, so presenting a session
+  token id as one finds nothing. `DeviceAuth` is on four routes and nothing else.
+- **The uid-scoping property holds.** The refresh path resolves the account from the token's own
+  `uid` and every device route still keys on `credentials.account.uid`; the new
+  `device_by_refresh_token` is reached only after that resolution, and `delete_device` looks the
+  row up by `(uid, id)` before deleting anything alongside it.
+- **The database-leak note is unchanged, and slightly better than it was.** A refresh token is
+  stored under `sha256`, so a leaked `refresh_tokens` row is not a spendable credential — unlike a
+  session token id, which is. A phone's connection is therefore *not* in the category the README's
+  Security section warns about.
+- **`POST /v1/destroy` is unauthenticated on purpose** ("for legacy reasons it is possible to call
+  this endpoint without credentials" — upstream's own comment). What it grants an observer is
+  revocation, not access, and only for a token they already hold or whose id they have learned;
+  `refresh_token_id` is deliberately not in `SECRET_KEYS` for the same reason. The `client_id`
+  check is `hmac.compare_digest`, as its sibling's is.
+- **The schema-v4 unique index cannot be tripped into a 500.** A refresh token that owns a record
+  and then names a different one is refused with errno 124 *before* the upsert, so one token can
+  never reach two rows. That was an assertion about control flow until
+  `test_a_phone_cannot_claim_another_devices_row` made it a test.
+- **`SECRET_KEYS` was extended by inspection rather than by accident** — see the phase 8 notes in
+  `plan.md`. Three of `/v1/destroy`'s four field names were already redacted; the fourth is argued
+  for rather than overlooked.
+- No new f-string SQL, no new comparison of a secret with `==`, no new read of `Host`, and no new
+  error envelope: the four mechanical properties the `S` rules and the pinned tests cover.
