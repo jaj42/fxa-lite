@@ -78,9 +78,17 @@ paths = [
   "packages/fxa-shared/test/oauth/scopes.js",
   # ConnectedServicesFactory: the merge behind /account/attached_clients.
   "packages/fxa-shared/connected-services",
-  # The profile server: a second errno table and the /v1/{profile,email,uid,display_name} set.
+  # The profile server: a second errno table and the /v1/{profile,email,uid,display_name} set,
+  # plus the avatar routes — `routes/profile.js:nextAvatar` and `routes/avatar/default.js` are
+  # where the monogram URL and its SVG come from.
   "packages/fxa-profile-server/lib/error.js",
   "packages/fxa-profile-server/lib/routes",
+  # Where `/v1/avatar/{id}` is mounted, and public.
+  "packages/fxa-profile-server/lib/routing.js",
+  # Why `avatar` and `avatarDefault` are both present or both absent: the profile document is
+  # assembled from four internal calls, and a scope-forbidden one drops its fields as a pair.
+  "packages/fxa-profile-server/lib/batch.js",
+  "packages/fxa-profile-server/lib/profileCache.js",
   # WebChannel: command names and envelope, and two working emitters to copy structure from.
   "packages/fxa-settings/src/lib/channels/firefox.ts",
   "packages/fxa-settings/src/pages/Signin/utils.ts",
@@ -203,4 +211,40 @@ paths = [
   # the thing an `algorithms=` argument is compared against.
   "jwcrypto/jwa.py",
   "pyproject.toml",
+]
+
+[[repo]]
+dir = "application-services"
+url = "https://github.com/mozilla/application-services"
+branch = "main"
+commit = "7674e0cf977272c746eebee7c145c982e06cc6c4"
+date = "2026-08-25"
+took = "what Firefox for Android requires of the responses fxa-lite writes — the fxa-client Rust crate that every mobile build embeds, read after a phone that synced fine still offered to sign in"
+paths = [
+  # `ProfileResponse`: `avatar` is a plain `String`, so a profile document without
+  # the key fails to parse and the phone never learns its own address.  Also the
+  # home of every other response struct the mobile client deserialises.
+  "components/fxa-client/src/internal/http_client.rs",
+  # `get_profile` and its ETag cache — the caller of the above.
+  "components/fxa-client/src/internal/profile.rs",
+  # `userinfo_endpoint` comes from `.well-known/openid-configuration`, not from
+  # `fxa-client-configuration`; and `normalize_token_server_url` strips the
+  # `/1.0/sync/1.5` suffix, which is the answer to one of phase 8's four questions.
+  "components/fxa-client/src/internal/config.rs",
+  # Where a failed `get_profile` lands the account: `AuthIssues`, not a retry.
+  "components/fxa-client/src/state_machine",
+]
+
+[[repo]]
+dir = "IronFox"
+url = "https://gitlab.com/ironfox-oss/IronFox"
+branch = "dev"
+commit = "b1bd8fa03466a5555ece638476722c6a36897640"
+date = "2026-08-25"
+took = "nothing — the fork the household's phone actually runs, kept because its patch set is the cheapest proof of which Fenix file does what: it patches by path against the Firefox monorepo"
+paths = [
+  # Names `components/menu/compose/header/MozillaAccountMenuItem.kt` as the menu
+  # item that renders either the address or "Sign in", and `AccountUiView.kt` as
+  # the settings screen's version of the same decision.
+  "patches/fenix-disable-sync-avatar-fetching.patch",
 ]

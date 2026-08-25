@@ -6,10 +6,11 @@ field through a separate scope-gated endpoint; here the gating is inline, so it
 is worth testing field by field.
 """
 
+import httpx
 import pytest
 
 from conformance.client import AuthClient, ClientError
-from conftest import EMAIL, PASSWORD
+from conftest import EMAIL, PASSWORD, PUBLIC_URL
 
 
 async def _token(client: AuthClient, scope: str) -> str:
@@ -30,9 +31,27 @@ async def test_profile_reports_everything_the_scope_allows(bearer_client: AuthCl
     assert profile["amrValues"] == ["pwd", "email"]
     assert profile["twoFactorAuthentication"] is False
     assert profile["metricsEnabled"] is False
-    # No avatar store: a client is told to draw its own placeholder.
+    # No avatar store, so the picture is always the monogram route — but the
+    # key is present, because Firefox for Android's parser requires a string
+    # there and drops the whole document without one.
+    assert profile["avatar"] == f"{PUBLIC_URL}/profile/v1/avatar/{EMAIL[0].lower()}"
     assert profile["avatarDefault"] is True
     assert "displayName" not in profile
+
+
+async def test_the_document_carries_every_field_the_mobile_client_requires(
+    bearer_client: AuthClient,
+) -> None:
+    """`ProfileResponse` in `application-services` is a Rust struct, and every
+    field but `displayName` is required.  `serde` rejects the whole document if
+    one is missing, so the phone's account has no profile — and Fenix's menu
+    reads a missing profile as "not signed in" and offers to sign in to the
+    account it is syncing with.  This is the regression guard for that."""
+    profile = await bearer_client.profile(await _token(bearer_client, "profile"))
+    assert isinstance(profile["uid"], str)
+    assert isinstance(profile["email"], str)
+    assert isinstance(profile["avatar"], str)
+    assert isinstance(profile["avatarDefault"], bool)
 
 
 async def test_uid_only_token_learns_only_the_uid(bearer_client: AuthClient) -> None:
@@ -42,6 +61,39 @@ async def test_uid_only_token_learns_only_the_uid(bearer_client: AuthClient) -> 
     assert "email" not in profile
     assert "locale" not in profile
     assert "amrValues" not in profile
+    # Both avatar keys or neither: they are one internal call upstream, and
+    # this token would not be allowed to make it.
+    assert "avatar" not in profile
+    assert "avatarDefault" not in profile
+
+
+async def test_avatar_without_email_scope_gives_away_no_initial(
+    bearer_client: AuthClient,
+) -> None:
+    """The monogram is a fact about the address, so a token that may not see
+    the address does not get to read the first letter of it off the URL."""
+    profile = await bearer_client.profile(await _token(bearer_client, "profile:avatar"))
+    assert profile["avatar"] == f"{PUBLIC_URL}/profile/v1/avatar/default"
+    assert profile["avatarDefault"] is True
+    assert "email" not in profile
+
+
+async def test_the_monogram_is_served_and_needs_no_token(http: httpx.AsyncClient) -> None:
+    """An `<img>` in browser chrome has no access token to spend on this."""
+    response = await http.get("/profile/v1/avatar/j")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/svg+xml"
+    assert ">J<" in response.text
+
+
+async def test_a_monogram_that_is_not_one_letter_renders_a_question_mark(
+    http: httpx.AsyncClient,
+) -> None:
+    """Upstream's own rule, and what makes `default` a name rather than a case."""
+    for path in ("/profile/v1/avatar/default", "/profile/v1/avatar/%C3%A9"):
+        response = await http.get(path)
+        assert response.status_code == 200
+        assert ">?<" in response.text
 
 
 async def test_sub_appears_only_for_openid(bearer_client: AuthClient) -> None:

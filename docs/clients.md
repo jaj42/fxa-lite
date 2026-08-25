@@ -99,7 +99,11 @@ and this page says so rather than guessing:
 advertises `sync_tokenserver_base_url`, so an app that prefers discovery when
 the override is blank would need one field, not two. Nobody has tried it with
 the field empty. Setting it costs nothing and is known to work, so it is still
-the instruction.
+the instruction. What *is* settled is the spelling: the client normalises the
+override by trimming a trailing `/1.0/sync/1.5`
+(`Config::normalize_token_server_url` in `mozilla/application-services`), so the
+origin and the full URL are the same value to it, and neither can be the reason
+a sign-in fails.
 
 *What the fields do to an already-signed-in profile.* Whether they require
 signing out first, and whether the app restarts, is untested. Sign out first.

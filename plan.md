@@ -1605,6 +1605,65 @@ published site. So: no retirement, no migration, and no new architecture prose h
 phase describes what it did; when that changes how the thing behaves, the change lands in `docs/`
 in the same commit.
 
+### Phase 13 — the profile Android could not read ✅ done
+
+Reported from the household rather than from a trace: on the phone, the main menu offered **Sign
+in** while Sync was signed in and syncing. Somebody on Mozilla's servers sees their address there
+and *Manage what you back up and sync*. Nothing in the exchange was an error — every request the
+phone made answered 200 — which is why this took a reading rather than a log.
+
+- **The cause is one absent key.** `GET /profile/v1/profile` omitted `avatar`, deliberately: "no
+  avatar store, so the field is simply absent rather than reported as an empty string". Desktop
+  Firefox does not mind. Firefox for Android is not JavaScript — every mobile build embeds the
+  Rust `fxa-client` crate from `mozilla/application-services`, and it deserialises the document
+  into `ProfileResponse`, in which `avatar` is a plain `String` and only `displayName` is an
+  `Option` (`components/fxa-client/src/internal/http_client.rs`). A missing key is not a `None`
+  there; it fails the whole parse, so the phone has no profile at all.
+- **Why that reads as "signed out" rather than as "no picture".** `SyncStoreSupport`'s account
+  observer is one early return: `val syncAccount = account.getProfile()?.toAccount() ?: return`,
+  and the `UpdateAccountState(Authenticated)` dispatch is on the line *after* it. With no profile
+  the store never leaves its initial `AccountState.Unknown`, and `MozillaAccountMenuItem` renders
+  `Unknown` exactly as it renders `NotAuthenticated` — the sign-in item. The account manager
+  itself was never confused; Sync ran the whole time, which is why nothing looked wrong from here.
+- **A second consequence, unobserved but worse.** In the Rust state machine a failed profile fetch
+  is `(S::Connected, E::CallGetProfile) => account.get_profile().to_state_machine_err(|| S::AuthIssues)?`
+  — a serde failure is not an auth error, so the one recovery attempt does not apply and the
+  account lands in `AuthIssues`. The menu is the symptom that gets noticed; an account that
+  reports authentication problems is the one that eventually stops.
+- **The fix is upstream's own answer, which is that there is always an avatar.** The reference
+  serves a monogram — `routes/profile.js:nextAvatar` builds `<profile origin>/v1/avatar/<initial>`
+  from the first alphanumeric character of the display name or the address, and
+  `routes/avatar/default.js` renders that letter as an SVG. fxa-lite now does both:
+  `avatar` names `/profile/v1/avatar/<initial>` and that route answers, unauthenticated, as the
+  reference's is — an `<img>` in browser chrome has no access token to spend on it. The embedded
+  base64 WOFF is the one thing not transcribed: shipping a font to guarantee one glyph is a trade
+  for a service rendering millions of these.
+- **`avatarDefault` moved behind `profile:avatar` on the way past**, and `avatar` with it. It was
+  unconditional, which was wrong in the other direction: upstream assembles this document from
+  four internal scope-gated calls (`lib/batch.js`, `lib/profileCache.js`), the avatar pair comes
+  from one of them, and a token without the scope gets a 403 that drops both keys together. A
+  token that may see the picture but not the address gets `/avatar/default`, which renders `?` —
+  upstream declines to guess an initial in that case for the same reason, and says so.
+- **`UPSTREAM.toml` gained two entries and the reason to trust the first one.** `mozilla/application-services`
+  is pinned at `7674e0cf` with the four paths this was read from — it is now a reference in the
+  sense phase 7 means, because "the mobile client requires this field" is a claim about a specific
+  commit of a specific crate. `IronFox` is pinned at `b1bd8fa0` and takes *nothing*: it is the
+  fork the phone actually runs, and its patch set is the cheapest available proof of which Fenix
+  file decides what, because it patches by path against the Firefox monorepo.
+- **What this says about the phase-8 rule.** Three of that phase's findings came from a packet
+  trace, and the phase closed by trusting traces over readings. This one no trace could produce:
+  the request was a 200 and the client's complaint was silent. The rule that survives is narrower
+  than the one phase 8 wrote down — *a trace establishes what was asked for, not what was
+  understood* — and the second half needs the client's own source, which is why the crate is now
+  in the manifest.
+- One question of phase 8's four is answered incidentally and cheaply, from the same crate:
+  `Config::normalize_token_server_url` trims a trailing `/1.0/sync/1.5`, so the *Custom Sync
+  server* field accepts the origin and the full URL alike. That is not the open question — whether
+  the field is needed at all when discovery advertises `sync_tokenserver_base_url` still wants a
+  handset — but it does mean the instruction cannot be wrong in the way it looked like it might be.
+
+925 tests, `ruff check` and `ty check` clean.
+
 ---
 
 ## Verification

@@ -25,11 +25,12 @@ sys.path.insert(0, str(ROOT / "docs" / "_ext"))
 
 from divergence_scan import FIELDS, MarkerError, parse, scan  # noqa: E402
 
-#: Every divergence phase 10 collected, plus the ones phases 8 and 11 added.
+#: Every divergence phase 10 collected, plus the ones phases 8, 11 and 13 added.
 #: Sorted, because this is a set and not an order.
 EXPECTED = {
     "access-tokens-not-revocable",
     "acr-values-refused",
+    "avatar-is-always-a-monogram",
     "batch-append-filters-id",
     "device-commands-not-enabled",
     "devices-notify-not-enabled",
