@@ -240,9 +240,25 @@ CREATE TABLE sync_batch_items (
 ) STRICT;
 """
 
+SCHEMA_V4 = """
+-- Phase 8: a device owned by an OAuth refresh token rather than a session token.
+--
+-- The column has been there since v1; what was missing is the constraint that
+-- makes it a *pointer* rather than a note.  Firefox for Android authenticates
+-- device registration with its refresh token and sends no device id, so the
+-- server has to find the record that token already owns -- exactly as it finds
+-- the one a session token owns -- or every reconnect leaves another orphan in
+-- the device list.
+--
+-- Partial, like its session-token sibling: the desktop rows have NULL here and
+-- SQLite would otherwise call them all duplicates of each other.
+CREATE UNIQUE INDEX devices_refresh_token_id
+    ON devices(refresh_token_id) WHERE refresh_token_id IS NOT NULL;
+"""
+
 #: Ordered DDL steps. A database stamped `user_version = N` has had the first
 #: `N` applied, so an existing file is upgraded by running the rest.
-MIGRATIONS = (SCHEMA_V1, SCHEMA_V2, SCHEMA_V3)
+MIGRATIONS = (SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4)
 
 #: Stored in SQLite's `user_version`.
 SCHEMA_VERSION = len(MIGRATIONS)
@@ -820,6 +836,12 @@ class Database:
         ).fetchone()
         return _device(row) if row else None
 
+    def device_by_refresh_token(self, token_id: str) -> Device | None:
+        row = self.connection.execute(
+            "SELECT * FROM devices WHERE refresh_token_id = ?", (token_id,)
+        ).fetchone()
+        return _device(row) if row else None
+
     def devices(self, uid: str) -> list[Device]:
         rows = self.connection.execute(
             "SELECT * FROM devices WHERE uid = ? ORDER BY created_at", (uid,)
@@ -827,7 +849,14 @@ class Database:
         return [_device(row) for row in rows]
 
     def delete_device(self, uid: str, device_id: str) -> Device | None:
-        """Delete a device and, with it, the session token that registered it."""
+        """Delete a device and, with it, the credential that registered it.
+
+        Whichever of the two pointers the record carries: the session token for
+        a desktop browser, the refresh token for a mobile one (`devices.destroy`
+        revokes it through `oauthDB.removeRefreshToken`).  That is what makes
+        "disconnect this device" actually disconnect it rather than log it out
+        until its next request.
+        """
         device = self.device(uid, device_id)
         if device is None:
             return None
@@ -836,6 +865,10 @@ class Database:
             if device.session_token_id:
                 connection.execute(
                     "DELETE FROM session_tokens WHERE token_id = ?", (device.session_token_id,)
+                )
+            if device.refresh_token_id:
+                connection.execute(
+                    "DELETE FROM refresh_tokens WHERE token_id = ?", (device.refresh_token_id,)
                 )
         return device
 

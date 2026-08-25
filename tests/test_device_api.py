@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from conformance.client import AuthClient, ClientError
-from conftest import EMAIL, PASSWORD
+from conftest import EMAIL, PASSWORD, PUBLIC_URL
+from fxa_lite.app import create_app
+from fxa_lite.config import from_dict
 
 FIREFOX_UA = (
     "Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0"
 )
+FENIX_CLIENT_ID = "a2270f727f45f648"
 
 
 async def test_register_a_device(client: AuthClient) -> None:
@@ -240,3 +244,167 @@ async def test_devices_notify_rejects_a_malformed_payload(
         await bearer_client.devices_notify(account["sessionToken"], payload)
     assert caught.value.status == 400
     assert caught.value.errno in (107, 108)
+
+
+# -- the mobile half: a device owned by a refresh token ----------------------
+#
+# Firefox for Android never holds a session token. It completes the OAuth flow,
+# keeps the refresh token, and sends *that* as its bearer credential for every
+# device call — `Bearer <64 hex>`, no `fxs_` prefix, a different table entirely
+# (`auth-schemes/refresh-token.js`). Everything below is the same registry seen
+# through that credential.
+
+
+@pytest.fixture
+async def phone(bearer_client: AuthClient) -> str:
+    """A Fenix sign-in, reduced to the one thing the device routes need."""
+    await bearer_client.sign_up(EMAIL, PASSWORD)
+    grant = await bearer_client.sync_sign_in(EMAIL, PASSWORD, client_id=FENIX_CLIENT_ID)
+    return grant.token["refresh_token"]
+
+
+async def test_a_refresh_token_can_register_a_device(
+    bearer_client: AuthClient, phone: str
+) -> None:
+    device = await bearer_client.device_register(
+        phone,
+        {"name": "IronFox on Google Pixel 7", "type": "mobile"},
+        kind="refreshToken",
+    )
+    assert len(device["id"]) == 32
+    assert device["name"] == "IronFox on Google Pixel 7"
+    assert device["type"] == "mobile"
+
+
+async def test_a_refresh_token_device_is_named_after_its_client(
+    bearer_client: AuthClient, phone: str
+) -> None:
+    """`devices.upsert`: no name, no User-Agent, so the OAuth client's name it is."""
+    device = await bearer_client.device_register(phone, {}, kind="refreshToken")
+    assert device["name"] == "Fenix"
+    # "For now we assume that all oauth clients that register a device record
+    # are mobile apps" — mozilla/fxa#449.
+    assert device["type"] == "mobile"
+
+
+async def test_a_refresh_token_re_registering_updates_one_row(
+    bearer_client: AuthClient, phone: str
+) -> None:
+    """The reason `devices.refresh_token_id` is a unique index.
+
+    Android sends no device id, so without a lookup on the refresh token every
+    reconnect would leave another row behind — and the device list is what the
+    other browsers send tabs to.
+    """
+    first = await bearer_client.device_register(phone, {"name": "Phone"}, kind="refreshToken")
+    second = await bearer_client.device_register(phone, {"name": "Phone"}, kind="refreshToken")
+    assert first["id"] == second["id"]
+    assert len(await bearer_client.devices(phone, kind="refreshToken")) == 1
+
+
+async def test_a_desktop_and_a_phone_are_two_devices(
+    bearer_client: AuthClient, phone: str
+) -> None:
+    """Each credential owns its own row, and each one knows which is its own."""
+    account = await bearer_client.sign_in(EMAIL, PASSWORD)
+    await bearer_client.device_register(account["sessionToken"], {"name": "Laptop"})
+    await bearer_client.device_register(phone, {"name": "Phone"}, kind="refreshToken")
+
+    from_phone = await bearer_client.devices(phone, kind="refreshToken")
+    assert {device["name"] for device in from_phone} == {"Laptop", "Phone"}
+    assert [device["name"] for device in from_phone if device["isCurrentDevice"]] == ["Phone"]
+
+    from_laptop = await bearer_client.devices(account["sessionToken"])
+    assert [device["name"] for device in from_laptop if device["isCurrentDevice"]] == ["Laptop"]
+
+
+async def test_a_phone_last_seen_when_its_refresh_token_was(
+    bearer_client: AuthClient, phone: str, db
+) -> None:
+    """A mobile device has no session token to read a timestamp off.
+
+    Upstream: "the devices table `lastAccessTime` column is not updated for
+    OAuth-based FxA devices, so we get this information in the OAuth db".
+    """
+    device = await bearer_client.device_register(phone, {"name": "Phone"}, kind="refreshToken")
+    record = db.device(db.account_by_email(EMAIL).uid, device["id"])
+    db.touch_refresh_token(record.refresh_token_id, record.created_at + 60_000)
+
+    listed = await bearer_client.devices(phone, kind="refreshToken")
+    assert listed[0]["lastAccessTime"] == record.created_at + 60_000
+
+
+async def test_destroying_a_phone_revokes_its_grant(
+    bearer_client: AuthClient, phone: str
+) -> None:
+    """`devices.destroy` → `oauthDB.removeRefreshToken`.
+
+    Disconnecting a device has to end its access, not just forget its name;
+    for a mobile client the refresh token *is* the connection.
+    """
+    device = await bearer_client.device_register(phone, {"name": "Phone"}, kind="refreshToken")
+    await bearer_client.device_destroy(phone, device["id"], kind="refreshToken")
+
+    with pytest.raises(ClientError) as caught:
+        await bearer_client.devices(phone, kind="refreshToken")
+    assert caught.value.errno == 110
+    with pytest.raises(ClientError):
+        await bearer_client.oauth_token(
+            client_id=FENIX_CLIENT_ID, grant_type="refresh_token", refresh_token=phone
+        )
+
+
+async def test_an_unknown_refresh_token_is_refused(bearer_client: AuthClient) -> None:
+    with pytest.raises(ClientError) as caught:
+        await bearer_client.device_register("f" * 64, {}, kind="refreshToken")
+    assert caught.value.status == 401
+    assert caught.value.errno == 110
+
+
+async def test_devices_notify_from_a_phone_is_still_refused(
+    bearer_client: AuthClient, phone: str
+) -> None:
+    """The credential is accepted; the feature is the thing that is not there."""
+    with pytest.raises(ClientError) as caught:
+        await bearer_client.devices_notify(phone, COLLECTION_CHANGED, kind="refreshToken")
+    assert caught.value.errno == 202
+
+
+async def test_a_grant_that_may_not_manage_devices(db, signing_keys) -> None:
+    """`config.oauth.deviceManagementClientIds` — the allowlist, and its point.
+
+    A refresh token is not by itself permission to touch the device registry:
+    upstream lets one through only if its client is on that list (which is the
+    five browsers, `DEVICE_MANAGEMENT_CLIENT_IDS`) or its scopes include
+    oldsync. A relier the household added to `[[clients]]` is neither, and the
+    device list is where Send Tab delivers.
+    """
+    relier = "00112233445566aa"
+    config = from_dict(
+        {
+            "public_url": PUBLIC_URL,
+            "security": {"open_registration": True},
+            "clients": [
+                {
+                    "id": relier,
+                    "name": "Reader",
+                    "redirect_uris": ["https://reader.example.com/oauth"],
+                    "allowed_scopes": "profile",
+                }
+            ],
+        }
+    )
+    app = create_app(config, db=db, signing_keys=signing_keys)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url=PUBLIC_URL) as http:
+        client = AuthClient(http, scheme="bearer")
+        account = await client.sign_up(EMAIL, PASSWORD)
+        minted = await client.oauth_token_from_session(
+            account["sessionToken"], client_id=relier, scope="profile", access_type="offline"
+        )
+        with pytest.raises(ClientError) as caught:
+            await client.device_register(
+                minted["refresh_token"], {"name": "Reader"}, kind="refreshToken"
+            )
+    assert caught.value.status == 401
+    assert caught.value.errno == 110

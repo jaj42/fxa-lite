@@ -42,6 +42,7 @@ class Errno:
     DEVICE_CONFLICT = 124
     UNKNOWN_CLIENT_ID = 162
     INVALID_SCOPES = 163
+    NOT_PUBLIC_CLIENT = 166
     SERVER_BUSY = 201
     FEATURE_NOT_ENABLED = 202
     UNEXPECTED_ERROR = 999
@@ -139,6 +140,16 @@ def unauthorized(reason: str | None = None) -> FxaError:
         message="Unauthorized for route",
         detail=reason,
     )
+
+
+def client_not_public() -> FxaError:
+    """`AppError.notPublicClient` — the *auth* tier's spelling of it.
+
+    The OAuth tier has its own (`not_public_client`, errno 116 in that table);
+    this is the one the refresh-token auth scheme raises, errno 166, and the
+    two are different numbers for the same sentence.
+    """
+    return _bad_request(Errno.NOT_PUBLIC_CLIENT, "Not a public client")
 
 
 def unknown_device() -> FxaError:

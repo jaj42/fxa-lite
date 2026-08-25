@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 #: `validators.clientId` — 8 bytes, hex.
 ClientId = Annotated[str, StringConstraints(pattern=r"^[a-fA-F0-9]{16}$")]
@@ -100,3 +100,39 @@ class DestroyRequest(OauthPayload):
     token: str = Field(max_length=8192)
     client_id: ClientId | None = None
     token_type_hint: str | None = Field(default=None, max_length=64)
+
+
+class LegacyDestroyRequest(OauthPayload):
+    """`POST /v1/destroy` — the pre-RFC-7009 spelling, which mobile still uses.
+
+    Where `/v1/oauth/destroy` takes one opaque `token`, this one names the kind
+    in the field: `access_token` (or `token`, which upstream renames to it),
+    `refresh_token`, or `refresh_token_id` for a client that kept the id rather
+    than the secret.  Exactly one, upstream's `.xor(...)`.
+
+    `client_secret` is accepted and ignored when it arrives without a
+    `client_id`; upstream keeps that for one dead client
+    (mozilla/fxa-oauth-server#198) and logs a warning.  Every client here is
+    public and has no secret to send, so it is accepted only so that a client
+    that sends one is not rejected on a field that means nothing.
+    """
+
+    token: str | None = Field(default=None, max_length=8192)
+    access_token: str | None = Field(default=None, max_length=8192)
+    refresh_token: RefreshTokenValue | None = None
+    refresh_token_id: RefreshTokenValue | None = None
+    client_id: ClientId | None = None
+    client_secret: str | None = Field(default=None, max_length=256)
+
+    @property
+    def access(self) -> str | None:
+        """`.rename('token', 'access_token')`."""
+        return self.access_token or self.token
+
+    @model_validator(mode="after")
+    def exactly_one_token(self) -> LegacyDestroyRequest:
+        """`.xor('access_token', 'refresh_token', 'refresh_token_id')`."""
+        present = [self.access, self.refresh_token, self.refresh_token_id]
+        if sum(value is not None for value in present) != 1:
+            raise ValueError("Exactly one of access_token, refresh_token, refresh_token_id")
+        return self

@@ -361,6 +361,11 @@ class AuthClient:
         return body
 
     def authorization(self, token: str, kind: str) -> dict[str, str]:
+        if kind == "refreshToken":
+            # The mobile scheme: the refresh token itself, unhashed and
+            # unprefixed. There is no HAWK spelling of it — a refresh token has
+            # no derived keys to sign with.
+            return {"authorization": f"Bearer {token}"}
         if self.scheme == "hawk":
             return hawk_header(token, kind)
         return bearer_header(token, kind)
@@ -471,22 +476,24 @@ class AuthClient:
 
     # -- devices --------------------------------------------------------------
 
-    async def device_register(self, session_token: str, payload: dict[str, Any]) -> Any:
-        return await self.authed(
-            "POST", "/account/device", session_token, "sessionToken", payload
-        )
+    async def device_register(
+        self, token: str, payload: dict[str, Any], kind: str = "sessionToken"
+    ) -> Any:
+        return await self.authed("POST", "/account/device", token, kind, payload)
 
-    async def devices(self, session_token: str) -> Any:
-        return await self.authed("GET", "/account/devices", session_token, "sessionToken")
+    async def devices(self, token: str, kind: str = "sessionToken") -> Any:
+        return await self.authed("GET", "/account/devices", token, kind)
 
-    async def devices_notify(self, session_token: str, payload: dict[str, Any]) -> Any:
-        return await self.authed(
-            "POST", "/account/devices/notify", session_token, "sessionToken", payload
-        )
+    async def devices_notify(
+        self, token: str, payload: dict[str, Any], kind: str = "sessionToken"
+    ) -> Any:
+        return await self.authed("POST", "/account/devices/notify", token, kind, payload)
 
-    async def device_destroy(self, session_token: str, device_id: str) -> Any:
+    async def device_destroy(
+        self, token: str, device_id: str, kind: str = "sessionToken"
+    ) -> Any:
         return await self.authed(
-            "POST", "/account/device/destroy", session_token, "sessionToken", {"id": device_id}
+            "POST", "/account/device/destroy", token, kind, {"id": device_id}
         )
 
     async def attached_clients(
@@ -553,6 +560,10 @@ class AuthClient:
 
     async def destroy_token(self, token: str, **payload: Any) -> Any:
         return await self.request("POST", "/oauth/destroy", {"token": token, **payload})
+
+    async def destroy_token_legacy(self, **payload: Any) -> Any:
+        """`POST /v1/destroy` — the spelling Firefox for Android uses."""
+        return await self.request("POST", "/destroy", payload)
 
     # -- profile --------------------------------------------------------------
 

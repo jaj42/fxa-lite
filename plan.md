@@ -781,7 +781,9 @@ its `sessionTokenId` and its `refreshTokenId` — so one browser is one row rath
 - **A grant and a device are never merged here**, because `/account/device` is session-authed and
   our device rows have no way to name a refresh token. A Sync sign-in is therefore two rows, not
   one. The `refreshTokenId` column and the merge path for it are kept, since upstream's rule is
-  what a mobile client would need if that ever changes.
+  what a mobile client would need if that ever changes. *(It changed, later in this same phase:
+  the mobile pass made `/account/device` refresh-token-authed too, and a Fenix sign-in is one row.
+  The merge path was already right and needed no edit — see "The Fenix half, started" below.)*
 - `createdTimeFormatted`/`lastAccessTimeFormatted` are `""` and `location` is `{}`: no localizer,
   no geo-IP. The keys stay because `attachedClientsDefaults` has them, and their only consumer is
   a settings UI fxa-lite does not serve.
@@ -848,6 +850,76 @@ instrument this phase is read with, and a 404 in it should mean something.
 
 755 tests, `ruff check` and `ty check` clean.
 
+**The Fenix half, started — and two routes were missing.** With TLS in front of it (phase 11,
+landed early for exactly this reason) Firefox for Android loads the sign-in page, completes the
+whole flow — `login?keys=true` → `scoped-key-data` → `keys` → `authorization` → `token`, every one
+a 200 — and says *Signed In*. The account is then not active, and the trace says why in its last
+two lines. Neither was configuration; both were routes fxa-lite did not serve.
+
+- **`POST /v1/destroy` was a 404.** The mobile client revokes tokens through the pre-RFC-7009
+  spelling, not `/v1/oauth/destroy`. Upstream exports both from one handler
+  (`lib/routes/oauth/destroy.js`), and they differ only in how the payload names the token:
+  `/oauth/destroy` takes one opaque `token`, `/destroy` takes exactly one of `access_token` (or
+  `token`, which it renames), `refresh_token`, or `refresh_token_id`. Two divergences in ours, both
+  consequences of earlier decisions: an access token is a no-op, because phase 3 left no
+  access-token table to delete a row from and upstream's `invalidToken` would then be the answer
+  for *every* access token; and an already-revoked refresh token is a success, matching
+  `/oauth/destroy` and RFC 7009 §2.2.
+- **`POST /v1/account/device` answered 401, and this is the one that mattered.** The phone
+  authenticates device registration with `Authorization: Bearer <64 hex>` — the **OAuth refresh
+  token itself**, unprefixed, because it never holds a session token at all. `credentials.py`
+  rejected it on purpose ("`Bearer <hex>` with no prefix is an OAuth refresh token, a different
+  credential entirely"), which was right about what it is and wrong about what to do with it.
+  Upstream lists three strategies on every `/account/device*` route — `sessionTokenBearer`,
+  `sessionToken`, `refreshToken` — and the third is `lib/routes/auth-schemes/refresh-token.js`:
+  hash the token to its id, look it up in the OAuth table, require the client to be registered and
+  public, and require the grant to be entitled to manage devices at all (its client on
+  `config.oauth.deviceManagementClientIds`, or its scopes including oldsync). That list is copied
+  verbatim into `oauth/clients.py` — including the two Android builds fxa-lite does not register
+  as clients of its own, because it is an authorization rule and not a registry, and trimming it
+  to our cast would silently change the rule.
+
+What that scheme brings with it, none of which is optional once a device can be owned by something
+other than a session:
+
+- **`devices.refresh_token_id` needed the unique index its session-token sibling always had**
+  (schema v4). Android sends no device id, so the server has to find the row that token already
+  owns; without the lookup every reconnect leaves another orphan, and the device list is what
+  Send Tab delivers to.
+- **`lastAccessTime` for a mobile device comes from its refresh token**, since it has no session
+  token to read one off and the device row itself never moves. Upstream says so in as many words
+  in `/account/devices`.
+- **Destroying a device revokes the refresh token**, as `devices.destroy` does through
+  `oauthDB.removeRefreshToken`. Disconnecting has to end the connection, and for a mobile client
+  the refresh token *is* the connection.
+- **A device with no name is named after its OAuth client**, and one registered by a refresh token
+  is `mobile` whatever the User-Agent says (mozilla/fxa#449) — a phone may send no `User-Agent`
+  worth reading, and "Fenix" beats "".
+- The note two sections up — "a grant and a device are never merged here, because
+  `/account/device` is session-authed and our device rows have no way to name a refresh token" —
+  is now wrong, and pleasantly so: a Fenix sign-in is one row in `attached_clients`, not two. The
+  merge path was already there and needed no change.
+
+`errors.Errno` gained 166, `NOT_PUBLIC_CLIENT` — the *auth* tier's spelling of a name the OAuth
+tier already had at 116. Two numbers, one sentence; upstream has both.
+
+**`SECRET_KEYS` was checked, as the tracing note above says it must be** whenever a route adds a
+field. `/v1/destroy` names four: `access_token`, `refresh_token` and `token` were already there,
+and `refresh_token_id` is deliberately not added. It is a SHA-256 of the token and cannot be
+spent — upstream hands it out to any session holder, as `refreshTokenId` in
+`/account/attached_clients` and as `jti` from `/introspect`. What it *can* do is revoke, so a log
+is a revocation capability and not an access one, which is the same trade upstream already makes.
+The refresh token arriving in an `Authorization` header is covered by `render_authorization`,
+which keeps the scheme and eight characters — visible in the trace that started this section.
+
+**Still open on Android**, and none of it observable until the phone runs again: the four questions
+at the top of this phase, and whether anything else is missing after device registration succeeds.
+`GET /account/device/commands` is the likeliest candidate — it is on upstream's refresh-token list
+and mobile polls it — but nothing has asked for it yet, and phase 8's rule is that a route is added
+when a trace asks for it.
+
+829 tests, `ruff check` and `ty check` clean.
+
 **Still to do, in the order that makes sense:**
 
 1. Re-run the desktop pass on a **fresh profile** against a clean database. Everything above was
@@ -859,13 +931,12 @@ instrument this phase is read with, and a 404 in it should mean something.
    the 404 as "this is a fresh server", wipes it and uploads `meta/global` and `crypto/keys`. It
    asks twice because `_remoteSetup` re-fetches after `_freshStart`. On the fresh-profile run the
    whole pair should appear once and never again.
-2. The Fenix half, which has not been started and is **blocked on a real TLS origin**, not merely
-   inconvenienced by its absence: a phone cannot reach a desktop's `localhost`, and the LAN
-   address it could reach is not a secure context, so `crypto.subtle` is undefined and the sign-in
-   page dies at the password field (see the secure-context finding above). The unblocking work is
-   a host with a certificate and `deploy/nginx.conf.example` in front of it — named as a phase 11
-   deliverable, and the one piece of that phase that may have to land early, since the four
-   questions at the top of this phase cannot be answered without it. iOS likewise.
+2. Re-run the Fenix pass now that `/v1/destroy` and refresh-token device auth are there. Sign-in
+   itself is established — the TLS origin unblocked it, which is why phase 11's proxy work landed
+   early — and the trace stopped at device registration; what happens *after* it succeeds has
+   never been seen. The four questions at the top of this phase are still unanswered, because
+   answering them needs a phone that syncs and not merely one that signs in. iOS likewise, and
+   still not attempted.
 
    **This is what decides the order of the remaining phases.** Phase 10 opens with "the code is
    complete… so there is a fixed target to audit", and the mobile pass is the most likely source
@@ -875,6 +946,15 @@ instrument this phase is read with, and a 404 in it should mean something.
    phase, rather than to defer mobile past the audit. If that trade is refused, the honest
    alternative is to split the phase in the plan — 8a desktop, done; 8b mobile, after 11 — rather
    than leave it looking half-finished.
+
+   **How it actually went, recorded because the prediction was half right.** Phases 9, 10 and 11
+   all landed before a phone was pointed at anything, and the mobile pass then did exactly what
+   this paragraph said it would: two new routes, a new auth scheme and a schema migration, all
+   after the audit. So **the refresh-token scheme, `/v1/destroy` and schema v4 have not been
+   through phase 10** — `ruff`'s `S` rules and the `SECRET_KEYS` check above are what they have
+   had. Whatever closes phase 8 should re-run the audit over the diff rather than over the whole
+   tree; that is a much smaller job than the first pass, and it is the item this paragraph was
+   trying to avoid having to write.
 
 ### Phase 9 — harden `crypto/jose.py` ✅ done
 

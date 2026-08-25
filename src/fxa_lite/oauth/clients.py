@@ -39,6 +39,23 @@ FIREFOX_DESKTOP_CLIENT_ID = "5882386c6d801776"
 FENIX_CLIENT_ID = "a2270f727f45f648"
 FIREFOX_IOS_CLIENT_ID = "1b1a3e44c54fbb58"
 
+#: `oauth.deviceManagementClientIds` — the clients whose *refresh tokens* may
+#: register, list and destroy devices (`auth-schemes/refresh-token.js`).  This is
+#: upstream's default list verbatim, including the two Android builds fxa-lite
+#: does not register as clients of its own: the list is an authorization rule,
+#: not a registry, and trimming it to our cast would silently change the rule.
+#: The gate it replaced — "the token carries the oldsync scope" — is still
+#: honoured alongside it, for a client signed in *with* Sync that is not here.
+DEVICE_MANAGEMENT_CLIENT_IDS = frozenset(
+    {
+        FIREFOX_DESKTOP_CLIENT_ID,
+        FIREFOX_IOS_CLIENT_ID,
+        "3332a18d142636cb",  # Firefox Android (Fennec)
+        FENIX_CLIENT_ID,
+        "3c49430b43dfba77",  # Android Components Reference Browser
+    }
+)
+
 #: Scopes that carry a derived key. Only these appear in `/account/scoped-key-data`
 #: and only these make a `keys_jwe` meaningful (`oauthServer.scopes` upstream).
 KEY_BEARING_SCOPES = frozenset(

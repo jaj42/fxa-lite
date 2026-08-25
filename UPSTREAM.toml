@@ -59,7 +59,10 @@ paths = [
   "packages/fxa-auth-server/config/dev.json",
   # Read narrowly, for what a switch means rather than for its value —
   # deviceNotificationsEnabled is documented there as a temporary safety switch,
-  # which is why fxa-lite's permanent version of it answers differently.
+  # which is why fxa-lite's permanent version of it answers differently.  One
+  # value *is* taken from it: oauth.deviceManagementClientIds, copied verbatim
+  # into oauth/clients.py, because that default is the authorization rule the
+  # refresh-token auth scheme applies and not a deployment preference.
   "packages/fxa-auth-server/config/index.ts",
   # The errno table behind errors.py.
   "libs/accounts/errors/src",

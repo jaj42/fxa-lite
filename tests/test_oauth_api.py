@@ -614,6 +614,64 @@ async def test_destroy_checks_the_client(grant, bearer_client: AuthClient) -> No
     assert caught.value.errno == 108
 
 
+async def test_legacy_destroy_revokes_a_refresh_token(
+    grant, bearer_client: AuthClient
+) -> None:
+    """`POST /v1/destroy` — what Firefox for Android calls, and a 404 until now.
+
+    Upstream exports this and `/v1/oauth/destroy` from one handler; the only
+    difference is that here the payload names the kind of token it carries.
+    """
+    assert await bearer_client.destroy_token_legacy(
+        refresh_token=grant.token["refresh_token"]
+    ) == {}
+    assert await bearer_client.introspect(grant.token["refresh_token"]) == {"active": False}
+
+
+async def test_legacy_destroy_by_refresh_token_id(grant, bearer_client: AuthClient, db) -> None:
+    """A client that kept the id rather than the token can still revoke it."""
+    described = await bearer_client.introspect(grant.token["refresh_token"])
+    assert await bearer_client.destroy_token_legacy(refresh_token_id=described["jti"]) == {}
+    assert db.refresh_token(described["jti"]) is None
+
+
+async def test_legacy_destroy_of_an_access_token_is_a_no_op(
+    grant, bearer_client: AuthClient
+) -> None:
+    """There is no access-token table to delete a row from — see the handler.
+
+    The `token` spelling is the one mobile sends for this; upstream renames it
+    to `access_token` before looking at it.
+    """
+    assert await bearer_client.destroy_token_legacy(token=grant.access_token) == {}
+    assert await bearer_client.destroy_token_legacy(access_token=grant.access_token) == {}
+
+
+async def test_legacy_destroy_checks_the_client(grant, bearer_client: AuthClient) -> None:
+    with pytest.raises(ClientError) as caught:
+        await bearer_client.destroy_token_legacy(
+            refresh_token=grant.token["refresh_token"], client_id=FENIX_CLIENT_ID
+        )
+    assert caught.value.errno == 108
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"token": "ab" * 32, "refresh_token": "cd" * 32},
+        {"refresh_token": "cd" * 32, "refresh_token_id": "ef" * 32},
+    ],
+)
+async def test_legacy_destroy_takes_exactly_one_token(
+    bearer_client: AuthClient, payload: dict
+) -> None:
+    """`.xor('access_token', 'refresh_token', 'refresh_token_id')`."""
+    with pytest.raises(ClientError) as caught:
+        await bearer_client.destroy_token_legacy(**payload)
+    assert caught.value.status == 400
+
+
 # -- scoped key data ---------------------------------------------------------
 
 

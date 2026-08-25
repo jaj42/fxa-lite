@@ -15,6 +15,14 @@ reference accepts, and the id is 32 bytes of CSPRNG output either way.  Sync
 Every failure answers 401 / errno 110, whatever went wrong.  That is the
 reference's own choice: a malformed header and an expired token are the same
 instruction to the client — get a new token.
+
+There is a third scheme, and it is only for the device routes:
+`Authorization: Bearer <64 hex>` with no `fx*_` prefix is an **OAuth refresh
+token**, which is how the mobile browsers authenticate device registration —
+they never hold a session token at all.  `refresh_credentials` below is
+`lib/routes/auth-schemes/refresh-token.js`, and unlike the other two it does
+look the credential up in a different table and does check what the grant is
+allowed to do.
 """
 
 from __future__ import annotations
@@ -27,7 +35,10 @@ from fastapi import Depends, Request
 
 from .. import errors
 from ..crypto.tokens import BEARER_PREFIXES, TokenType
-from ..db import Account, Database, KeyFetchToken, SessionToken
+from ..db import Account, Database, KeyFetchToken, RefreshToken, SessionToken
+from ..oauth.clients import DEVICE_MANAGEMENT_CLIENT_IDS, OLDSYNC_SCOPE, Client
+from ..oauth.grant import hash_token
+from ..oauth.scopes import ScopeSet
 from ..throttle import FailureThrottle
 
 #: Hawk's own limit, from the library the reference vendored.
@@ -37,6 +48,10 @@ _SCHEME_RE = re.compile(r"^(\w+)(?:\s+(.*))?$", re.DOTALL)
 #: `key="value"` pairs, comma separated. Hawk's grammar, minus the parts we drop.
 _ATTRIBUTE_RE = re.compile(r'(\w+)="([^"\\]*)"\s*(?:,\s*|$)')
 _TOKEN_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+#: `validators.refreshToken`: a bare 32-byte hex value, `Bearer` and no prefix.
+_BEARER_RE = re.compile(r"^[Bb]earer\s+([0-9a-f]{64})$")
+#: The scope that lets a refresh token manage devices whatever client holds it.
+_OLDSYNC = ScopeSet.from_array([OLDSYNC_SCOPE])
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +64,31 @@ class SessionCredentials:
 class KeyFetchCredentials:
     token: KeyFetchToken
     account: Account
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceCredentials:
+    """What a device route knows about its caller, from either credential.
+
+    Upstream lists three strategies on every `/account/device*` route
+    (`sessionTokenBearer`, `sessionToken`, `refreshToken`) and the handlers read
+    one `credentials` object that may carry either `id` (a session token) or
+    `refreshTokenId`.  This is that object: exactly one of `session` and
+    `refresh` is set, and `client` comes with the latter.
+    """
+
+    account: Account
+    session: SessionToken | None = None
+    refresh: RefreshToken | None = None
+    client: Client | None = None
+
+    @property
+    def session_token_id(self) -> str | None:
+        return self.session.token_id if self.session else None
+
+    @property
+    def refresh_token_id(self) -> str | None:
+        return self.refresh.token_id if self.refresh else None
 
 
 def token_id(header: str | None, token_type: TokenType) -> str | None:
@@ -139,8 +179,59 @@ def key_fetch_credentials(request: Request) -> KeyFetchCredentials:
     return KeyFetchCredentials(token=token, account=account)
 
 
+def device_credentials(request: Request) -> DeviceCredentials:
+    """Dependency for `/account/device*`: a session token *or* a refresh token.
+
+    hapi tries the strategies in the order the route lists them and takes the
+    first that authenticates; the only thing that distinguishes them on the wire
+    is the shape of the bearer value, so the header decides here and no
+    credential is looked up twice.
+    """
+    header = request.headers.get("authorization")
+    match = _BEARER_RE.match(header.strip()) if header else None
+    if match is None:
+        session = session_credentials(request)
+        return DeviceCredentials(account=session.account, session=session.token)
+    return refresh_credentials(request, match.group(1))
+
+
+def refresh_credentials(request: Request, refresh_token: str) -> DeviceCredentials:
+    """`schemeRefreshToken` — the token itself is the credential, hashed to its id.
+
+    Two checks upstream makes and this makes with it. The client must still be
+    registered and public, because a confidential client reaching a device route
+    with a bearer token has got there without proving it is itself. And the
+    grant must be entitled to manage devices at all: `DEVICE_MANAGEMENT_CLIENT_IDS`
+    or the oldsync scope.
+    """
+    db = database(request)
+    record = db.refresh_token(hash_token(refresh_token))
+    if record is None:
+        raise errors.unauthorized("Token not found")
+    account = db.account(record.uid)
+    if account is None:
+        raise errors.unauthorized("Token not found")
+
+    client = request.app.state.clients.get(record.client_id)
+    if client is None:
+        # A grant outliving the `[[clients]]` entry that issued it. Upstream
+        # cannot reach this — its clients live in the same database as its
+        # tokens — so there is no reference behaviour to match; "get a new
+        # token" is the only useful thing to say.
+        raise errors.unauthorized("Unknown client")
+    if not client.public_client:
+        raise errors.client_not_public()
+    if record.client_id not in DEVICE_MANAGEMENT_CLIENT_IDS and not ScopeSet.from_string(
+        record.scope
+    ).intersects(_OLDSYNC):
+        raise errors.unauthorized("Token not allowed to manage devices")
+
+    return DeviceCredentials(account=account, refresh=record, client=client)
+
+
 #: Route annotations. `Annotated` rather than a `Depends(...)` default so the
 #: dependency is part of the type, and the parameter needs no default value.
 Session = Annotated[SessionCredentials, Depends(session_credentials)]
 OptionalSession = Annotated[SessionCredentials | None, Depends(optional_session_credentials)]
 KeyFetch = Annotated[KeyFetchCredentials, Depends(key_fetch_credentials)]
+DeviceAuth = Annotated[DeviceCredentials, Depends(device_credentials)]

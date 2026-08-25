@@ -5,9 +5,12 @@ device record as part of connecting to Sync and treats a failure there as a
 failed connection.  So the records are stored faithfully, echoed back in the
 shape the reference uses, and simply never delivered to.
 
-A device is owned by the session token that registered it; deleting either one
-deletes the other, which is what makes "disconnect this device" sign the
-session out.
+A device is owned by the credential that registered it — a session token for
+Firefox Desktop, an OAuth refresh token for the mobile browsers, which never
+hold a session token at all — and deleting the device deletes that credential
+with it, which is what makes "disconnect this device" actually disconnect it.
+Which of the two authenticated the request is `credentials.session` versus
+`credentials.refresh`; see `credentials.device_credentials`.
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ from fastapi import APIRouter, Query, Request
 
 from .. import accounts, errors
 from ..db import Database, Device
-from .credentials import Session, SessionCredentials, database
+from .credentials import DeviceAuth, DeviceCredentials, database
 from .models import DeviceDestroy, DeviceRegistration, DevicesNotify
 from .user_agent import parse, synthesize_name
 
@@ -28,12 +31,12 @@ router = APIRouter(tags=["devices"])
 
 @router.post("/account/device")
 def device_register(
-    payload: DeviceRegistration, request: Request, credentials: Session
+    payload: DeviceRegistration, request: Request, credentials: DeviceAuth
 ) -> dict[str, Any]:
-    """Create or update this session's device record."""
+    """Create or update the device record this credential owns."""
     db: Database = database(request)
-    user_agent = request.headers.get("user-agent", credentials.token.user_agent)
-    existing = db.device_by_session_token(credentials.token.token_id)
+    user_agent = request.headers.get("user-agent", _session_user_agent(credentials))
+    existing = _current_device(db, credentials)
 
     if payload.id:
         current = db.device(credentials.account.uid, payload.id)
@@ -42,8 +45,10 @@ def device_register(
         if existing is not None and existing.id != payload.id:
             raise errors.device_session_conflict(existing.id)
     else:
-        # No id: update the record this session already owns, if any, rather
-        # than accumulating a new device on every reconnect.
+        # No id: update the record this credential already owns, if any, rather
+        # than accumulating a new device on every reconnect. Firefox for Android
+        # sends no id at all, so this is the only thing keeping its device list
+        # to one row.
         current = existing
 
     device = _merge(payload, current, credentials, user_agent)
@@ -54,12 +59,15 @@ def device_register(
 @router.get("/account/devices")
 def device_list(
     request: Request,
-    credentials: Session,
+    credentials: DeviceAuth,
     filterIdleDevicesTimestamp: int | None = Query(default=None),
 ) -> list[dict[str, Any]]:
     db: Database = database(request)
-    now = accounts.now_ms()
-    db.touch_session_token(credentials.token.token_id, now)
+    if credentials.session is not None:
+        # "If this request is using a session token we bump the last access
+        # time." A refresh token's is bumped when it is *spent*, at
+        # `/v1/oauth/token`, and not by reading a list.
+        db.touch_session_token(credentials.session.token_id, accounts.now_ms())
 
     devices = []
     for device in db.devices(credentials.account.uid):
@@ -69,7 +77,7 @@ def device_list(
         devices.append(
             {
                 **_response(device),
-                "isCurrentDevice": device.session_token_id == credentials.token.token_id,
+                "isCurrentDevice": _is_current(device, credentials),
                 "lastAccessTime": last_access,
                 "location": {},
             }
@@ -77,22 +85,42 @@ def device_list(
     return devices
 
 
+def _is_current(device: Device, credentials: DeviceCredentials) -> bool:
+    """Whichever pointer the caller authenticated with, matched against this row."""
+    if credentials.session is not None:
+        return device.session_token_id == credentials.session.token_id
+    return device.refresh_token_id == credentials.refresh_token_id
+
+
 def last_access_time(db: Database, device: Device) -> int:
-    """When this device was last seen — which is when its session token was.
+    """When this device was last seen — which is when its credential was used.
 
     Upstream keeps `lastAccessTime` on the device row and refreshes it from the
     session token cache (`mergeDeviceAndSessionToken`). There is no cache here,
     so the session token is simply read; a device whose session is gone falls
     back to its own creation time, which is the last moment it was certainly
     there.
+
+    A mobile device has no session token and its row would then never move, so
+    the same question is asked of its refresh token instead — upstream's
+    `/account/devices` says exactly this: "the devices table `lastAccessTime`
+    column is not updated for OAuth-based FxA devices, so we get this
+    information in the OAuth db".
     """
-    session = db.session_token(device.session_token_id) if device.session_token_id else None
-    return session.last_access_time if session else device.created_at
+    if device.session_token_id:
+        session = db.session_token(device.session_token_id)
+        if session is not None:
+            return session.last_access_time
+    if device.refresh_token_id:
+        refresh = db.refresh_token(device.refresh_token_id)
+        if refresh is not None:
+            return max(device.created_at, refresh.last_used_at)
+    return device.created_at
 
 
 @router.post("/account/device/destroy")
 def device_destroy(
-    payload: DeviceDestroy, request: Request, credentials: Session
+    payload: DeviceDestroy, request: Request, credentials: DeviceAuth
 ) -> dict[str, Any]:
     db: Database = database(request)
     if db.delete_device(credentials.account.uid, payload.id) is None:
@@ -101,7 +129,7 @@ def device_destroy(
 
 
 @router.post("/account/devices/notify")
-def devices_notify(payload: DevicesNotify, credentials: Session) -> dict[str, Any]:
+def devices_notify(payload: DevicesNotify, credentials: DeviceAuth) -> dict[str, Any]:
     """Firefox's "the clients collection changed" nudge — answered 403/202.
 
     Sync sends this after uploading the `clients` collection, asking the server
@@ -133,19 +161,47 @@ def devices_notify(payload: DevicesNotify, credentials: Session) -> dict[str, An
     raise errors.feature_not_enabled()
 
 
+def _current_device(db: Database, credentials: DeviceCredentials) -> Device | None:
+    """The record this credential owns, by whichever pointer it has."""
+    if credentials.session is not None:
+        return db.device_by_session_token(credentials.session.token_id)
+    if credentials.refresh is not None:
+        return db.device_by_refresh_token(credentials.refresh.token_id)
+    return None
+
+
+def _session_user_agent(credentials: DeviceCredentials) -> str:
+    """The fallback when the request has no `User-Agent` of its own.
+
+    A refresh token has nowhere to have remembered one, so a mobile client that
+    sends no header gets its name from its OAuth client instead — see `_merge`.
+    """
+    return credentials.session.user_agent if credentials.session else ""
+
+
 def _merge(
     payload: DeviceRegistration,
     current: Device | None,
-    credentials: SessionCredentials,
+    credentials: DeviceCredentials,
     user_agent: str,
 ) -> Device:
     """Apply a registration payload over the stored record, filling the gaps."""
     name = payload.name if payload.name is not None else (current.name if current else "")
     if not name:
-        name = synthesize_name(user_agent)
+        # `devices.upsert`: an OAuth client's device is named after the client
+        # before anything is synthesized from a User-Agent, because the client
+        # name is the better answer and the header may not even be there.
+        name = (credentials.client.name if credentials.client else "") or synthesize_name(
+            user_agent
+        )
     device_type = payload.type or (current.type if current else "")
     if not device_type:
-        device_type = "mobile" if parse(user_agent).is_mobile else "desktop"
+        # "For now we assume that all oauth clients that register a device
+        # record are mobile apps" (mozilla/fxa#449).
+        if credentials.refresh is not None:
+            device_type = "mobile"
+        else:
+            device_type = "mobile" if parse(user_agent).is_mobile else "desktop"
 
     push_callback = _pick(payload.pushCallback, current, "push_callback")
     # A new push endpoint has not expired yet; only an unchanged one keeps its
@@ -157,8 +213,8 @@ def _merge(
     return Device(
         id=payload.id or (current.id if current else secrets.token_hex(16)),
         uid=credentials.account.uid,
-        session_token_id=credentials.token.token_id,
-        refresh_token_id=None,
+        session_token_id=credentials.session_token_id,
+        refresh_token_id=credentials.refresh_token_id,
         name=name,
         type=device_type,
         created_at=current.created_at if current else accounts.now_ms(),

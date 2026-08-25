@@ -46,6 +46,7 @@ from .models import (
     AuthorizationRequest,
     DestroyRequest,
     IntrospectRequest,
+    LegacyDestroyRequest,
     ScopedKeyDataRequest,
     TokenRequest,
     VerifyRequest,
@@ -601,6 +602,46 @@ def oauth_destroy(payload: DestroyRequest, request: Request) -> dict[str, Any]:
     """
     db = database(request)
     token = db.refresh_token(hash_token(payload.token))
+    if token is not None:
+        if payload.client_id and not hmac.compare_digest(
+            token.client_id, payload.client_id.lower()
+        ):
+            raise errors.oauth_invalid_token()
+        db.delete_refresh_token(token.token_id)
+    return {}
+
+
+@router.post("/destroy")
+def destroy(payload: LegacyDestroyRequest, request: Request) -> dict[str, Any]:
+    """`POST /v1/destroy` — the same revocation, in the spelling mobile sends.
+
+    Firefox for Android calls this, not `/v1/oauth/destroy`, and a 404 here is
+    the first thing in its sign-in trace that goes wrong. The two routes are one
+    handler upstream (`routes/oauth/destroy.js` exports both) and differ only in
+    how the payload names the token.
+
+    Two divergences from that handler, both of them consequences of decisions
+    made earlier:
+
+    * **An access token cannot be revoked**, because there is no access-token
+      table to delete a row from (phase 3). Upstream would answer `invalidToken`
+      for a token it cannot find; here that would be the answer for *every*
+      access token, which tells the client nothing true. It is a no-op, and the
+      token expires within `ttl.access_token`.
+    * **A refresh token that is already gone is not an error**, matching
+      `/v1/oauth/destroy` and RFC 7009 §2.2 — see `oauth_destroy`. Upstream
+      throws; a client that cannot distinguish "revoked" from "was already
+      revoked" has no use for the distinction.
+
+    Client credentials, where a client sends them, are checked exactly as they
+    are there: a token belonging to a different client is not this caller's to
+    revoke.
+    """
+    if payload.access is not None:
+        return {}
+    db = database(request)
+    token_id = payload.refresh_token_id or hash_token(payload.refresh_token or "")
+    token = db.refresh_token(token_id)
     if token is not None:
         if payload.client_id and not hmac.compare_digest(
             token.client_id, payload.client_id.lower()
