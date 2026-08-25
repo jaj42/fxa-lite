@@ -1,0 +1,53 @@
+# Two jobs: keep the build context small, and keep deployment secrets out of an
+# image that may end up in a registry.
+#
+# Patterns are matched against paths relative to the context root, so a bare
+# `*.sqlite` would match `./fxa.sqlite` and nothing deeper.  Everything that has
+# to match at any depth is written `**/`.
+
+# 844 MB of upstream checkouts.  Gitignored, therefore invisible to review, and
+# without this line every byte of it is uploaded to the daemon on every build.
+resources/
+
+.git/
+.github/
+.venv/
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+.mypy_cache/
+.claude/
+
+# The development interpreter pin.  Copied into the build it would make uv look
+# for the 3.12 that is not in the base image; the image's Python is chosen by
+# the FROM line, which is the only place that choice should live.
+.python-version
+
+# Local deployment state — mirrors the block of the same name in .gitignore.
+# `serve` reads all of these from /data at runtime; none of them belongs in a
+# layer.  scripts/docker-smoke.sh asserts the built image contains no such path.
+fxa.toml
+**/*.sqlite
+**/*.sqlite-wal
+**/*.sqlite-shm
+signing-key.json
+retired-key.json
+deploy/nginx.conf
+
+# Not needed to build the wheel.  `uv sync --no-editable` installs the project
+# from src/ + pyproject.toml + uv.lock + README.md (pyproject names it), and the
+# runtime stage receives only /app/.venv, so anything else is context weight.
+tests/
+scripts/
+deploy/
+docs/
+plan.md
+AUDIT.md
+UPSTREAM.toml
+fxa.example.toml
+Dockerfile
+.dockerignore
+docker-compose.yaml

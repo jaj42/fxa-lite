@@ -1,0 +1,142 @@
+# TLS in front of fxa-lite, for one origin.
+#
+#   cp deploy/nginx.conf.example deploy/nginx.conf
+#
+# and edit the four marked places: server_name, the two certificate paths, and
+# the upstream line.  Then either drop it into a host nginx
+# (/etc/nginx/conf.d/fxa-lite.conf) or start the compose profile that mounts it:
+#
+#   docker compose --profile tls up -d
+#
+# Why this file exists at all, given that fxa-lite is meant to be one process:
+# the sign-in page stretches the password with crypto.subtle, and browsers
+# expose that only in a *secure context*.  http://localhost qualifies; a LAN
+# address does not.  Without TLS a phone cannot sign in — this is not
+# deployment polish, it is the difference between a household server and a
+# desktop-only toy.
+#
+# Certificates are the host's job:
+#
+#   certbot certonly --webroot -w /var/www/certbot -d fxa.example.com
+#
+# with a renewal hook that reloads nginx.  Nothing here issues them.
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting on the unauthenticated password paths.
+#
+# fxa-lite throttles *failed* password checks per account, which is the half a
+# proxy cannot do; this is the per-IP half, which the app cannot do, because
+# behind a proxy every client is 127.0.0.1.  Both halves are required — the
+# audit's F3 decision — so this ships uncommented.  Loosen it if a household of
+# five somehow trips it; do not delete it.
+#
+# Below the burst, nginx answers 429 with its own HTML error page rather than
+# the accounts API's JSON envelope.  Firefox surfaces that as a generic sign-in
+# failure, which is the correct outcome and an ugly one; the app's own throttle
+# answers errno 114 properly and is what a real user hits first.
+limit_req_zone $binary_remote_addr zone=fxa_auth:1m rate=10r/m;
+limit_req_status 429;
+
+upstream fxa_lite {
+    # EDIT: host nginx, with docker-compose.yaml publishing 127.0.0.1:9000.
+    server 127.0.0.1:9000;
+
+    # Under `docker compose --profile tls`, nginx is a container of its own and
+    # 127.0.0.1 is that container, not the host.  Comment the line above and
+    # uncomment this one, which resolves over the compose network.  It is the
+    # only line in this file that differs between the two deployments.
+    # server fxa-lite:9000;
+
+    keepalive 8;
+}
+
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name fxa.example.com;                       # EDIT
+
+    # Carved out ahead of the redirect: an ACME http-01 challenge must be
+    # answerable over plain HTTP, and a 301 does not answer it.
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name fxa.example.com;                       # EDIT
+
+    ssl_certificate     /etc/letsencrypt/live/fxa.example.com/fullchain.pem;   # EDIT
+    ssl_certificate_key /etc/letsencrypt/live/fxa.example.com/privkey.pem;     # EDIT
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:fxa_tls:10m;
+    ssl_session_timeout 1d;
+    ssl_stapling on;
+    ssl_stapling_verify on;
+
+    # fxa-lite does not set HSTS itself, and a secure context is now a hard
+    # requirement rather than a preference, so it belongs here.  Add
+    # `preload` only once you are sure this hostname will never serve plain
+    # HTTP again — the list is easy to enter and slow to leave.
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    # /info/configuration advertises max_request_bytes = 2625536 and Firefox
+    # believes it.  nginx's 1 MB default turns a history batch into a 413 that
+    # never reaches the app, and the client reads that as a stalled sync.
+    client_max_body_size 3m;
+
+    access_log /var/log/nginx/fxa-lite.access.log;
+    error_log  /var/log/nginx/fxa-lite.error.log;
+
+    # Courtesy, not load-bearing.  fxa-lite builds the discovery document, the
+    # tokenserver's api_endpoint and every HAWK signature base from `public_url`
+    # in fxa.toml, and never reads the request's Host or X-Forwarded-Proto
+    # (phase 6, deliberately).  Say so here, or the next person spends an
+    # afternoon on headers that change nothing.  What *does* matter is that
+    # `public_url` is exactly this origin, https and all.
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+
+    # The three unauthenticated paths that reach a password check.  Each one is
+    # `location =`, so nothing else inherits the limit — a rate-limited
+    # /storage/1.5 would break sync.
+    location = /v1/account/login {
+        limit_req zone=fxa_auth burst=10 nodelay;
+        proxy_pass http://fxa_lite;
+    }
+
+    location = /v1/account/create {
+        limit_req zone=fxa_auth burst=10 nodelay;
+        proxy_pass http://fxa_lite;
+    }
+
+    location = /v1/session/reauth {
+        limit_req zone=fxa_auth burst=10 nodelay;
+        proxy_pass http://fxa_lite;
+    }
+
+    # One location, one upstream, no path rewriting — and this is the rule that
+    # breaks everything at once when it is broken.  The discovery document and
+    # the tokenserver's api_endpoint are built from `public_url`, and HAWK
+    # signatures cover the URL the tokenserver handed out; a proxy that strips
+    # or adds a prefix invalidates every signature simultaneously, which
+    # presents as sync failing with 401 long after sign-in worked.  Whatever
+    # terminates TLS must be the origin `public_url` names, exactly.
+    location / {
+        proxy_pass http://fxa_lite;
+    }
+}

@@ -5,6 +5,14 @@
 # The origin Firefox is pointed at via identity.fxaccounts.autoconfig.uri.
 # Everything — accounts API, OAuth, profile, sign-in page, tokenserver and sync
 # storage — is served below it.
+#
+# Behind a reverse proxy (or in a container) this is the *external* https origin,
+# never the address fxa-lite binds: the discovery document, the tokenserver's
+# api_endpoint and every HAWK signature base are built from this string, and
+# nothing is read from the request's Host header. So a proxy that rewrites Host
+# is harmless, and one that adds or strips a path prefix breaks every signature
+# at once. Whatever terminates TLS must be exactly this origin — see
+# deploy/nginx.conf.example.
 public_url = "http://localhost:9000"
 
 # HMAC secret shared by the tokenserver and sync storage tiers. Upstream this

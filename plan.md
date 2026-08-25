@@ -1063,7 +1063,7 @@ written into the docs rather than into a file nobody opens. Every fix lands with
 everything else in this project has. Then re-run the suite **and** phase 8 against real Firefox —
 the audit will touch auth-path code, and that path has exactly one integration test that matters.
 
-### Phase 11 — Docker
+### Phase 11 — Docker ✅ done
 
 `uvx fxa-lite --config fxa.toml` is the intended outcome, but the machine a household actually
 runs this on is a NAS or a small always-on box that already hosts three other things, and there
@@ -1218,6 +1218,58 @@ document and `/__heartbeat__` → assert the secrets are absent from the image, 
 `fxa.example.toml` comment on `public_url` behind a proxy. Phase 12's CI builds the image on PR
 (build only, no push) and phase 12's deployment page is where this stops being a list of flags and
 becomes instructions.
+
+**Shipped**, and where it went differently:
+
+- `Dockerfile`: builder on `ghcr.io/astral-sh/uv:0.11.29-python3.13-trixie-slim`, runtime on
+  `python:3.13-slim-trixie`, both pinned by the digest of their multi-arch OCI index so one pin
+  still builds amd64 and arm64. `uv sync --locked --no-dev --no-editable` in two layers, cache
+  mount, `UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=0`. 173 MB, and `/app`
+  contains `.venv` and nothing else. The `gh attestation verify` command is recorded beside the
+  pin but was **not run**: the `gh` on this machine is 2.46, which predates the subcommand.
+- **`.python-version` had to join `.dockerignore`**, which the phase did not anticipate. It says
+  3.12 (the project supports >=3.12); copied into the build by `COPY . /app` it wins over the
+  base image's interpreter and the second `uv sync` fails with "No interpreter found for Python
+  3.12" — after the first one has already succeeded, which is what makes it confusing. The FROM
+  line is the only place that choice should live. `tests/test_docker.py` pins the exclusion with
+  the reason attached.
+- `.dockerignore` mirrors `.gitignore`'s deployment-state block, with `**/` where a pattern has
+  to match at any depth — a bare `*.sqlite` matches only the context root, which is exactly the
+  kind of near-miss this file is bad at showing. Both halves are asserted: `tests/test_docker.py`
+  reads the block out of `.gitignore` and requires each pattern in `.dockerignore` (so adding a
+  secret to one and forgetting the other fails a test), and `scripts/docker-smoke.sh` proves it
+  against the built image with a `find` over the layers.
+- **The compose port publication is unconditional, and the phase asked for it to disappear under
+  the `tls` profile.** Compose has no mechanism for that — `profiles` scopes services, not keys —
+  and the alternatives all cost more than the property is worth: a second service definition, a
+  `network_mode: service:` pairing that moves 80/443 onto the app service, or an env var whose
+  "off" value compose rejects. It stays `127.0.0.1:9000:9000` with a comment saying that under
+  the profile it is only useful for local debugging and can be commented out. Loopback-only
+  publication next to a proxy on the same host is not a regression; the sentence in the plan was.
+- `deploy/nginx.conf.example` has all five: `client_max_body_size 3m` (against the advertised
+  2 625 536 — `tests/test_docker.py` compares it to `LIMITS.max_request_bytes` rather than to a
+  transcribed number), one `location /` and no rewriting, the proxy headers marked as courtesy,
+  HSTS with the `:80` redirect behind an ACME carve-out, and `limit_req_zone` uncommented per the
+  audit's F3. Verified with `nginx -t` in the pinned nginx image, which the smoke script re-runs.
+- **The upstream address is one edited line, not two files.** The example serves both a host nginx
+  (`127.0.0.1:9000`) and the compose profile (`fxa-lite:9000`, over the compose network, since
+  `127.0.0.1` in the proxy container is the proxy). Splitting the `upstream` block into a second
+  mounted file was the alternative; it is worse, because the file has to be copied and edited
+  anyway — `server_name` and two certificate paths — so the upstream is a fourth edit in a list
+  of three, all marked `# EDIT`. `deploy/nginx.conf` is gitignored, as `fxa.toml` is.
+- `scripts/docker-smoke.sh`: build → assert nothing secret, no source tree, no `uv` and no
+  `pytest` in any layer → assert `serve` without a key still exits 1 with the right instruction →
+  config, `keygen`, `account add --password`, `account list` → `serve` hardened exactly as compose
+  hardens it → `/__heartbeat__`, the discovery document (asserted to name the external origin and
+  *not* the container's), `/v1/jwks` → `compose config` and `nginx -t`. Passes end to end.
+- The signing key after a containerised `keygen` is `600 fxa fxa` — mode *and* owner, since either
+  half alone proves nothing. The database is `644 fxa`: correct ownership, and the mode is
+  AUDIT.md's F5, still open. The smoke script warns rather than fails there and says which
+  finding it is; the check becomes an assertion when F5 lands.
+- Not done, deliberately: no multi-arch build was executed. `docker buildx build --platform
+  linux/amd64,linux/arm64` is recorded in the Dockerfile header, and both pinned indexes were
+  checked to carry linux/arm64, but this machine runs podman without a buildx equivalent, and an
+  emulated arm64 build proves less than phase 12's CI will.
 
 ### Phase 12 — documentation and CI
 

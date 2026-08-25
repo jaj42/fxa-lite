@@ -19,6 +19,10 @@ uploads and conditional requests, behind fully verified HAWK signatures — and
 `UPSTREAM.toml`, which records the reference commits every protocol constant
 here was read against.
 
+Phase 11 shipped the container deliverables — `Dockerfile`, `docker-compose.yaml`
+with an opt-in `tls` profile, `deploy/nginx.conf.example` and a smoke script that
+drives the whole bootstrap against a built image.
+
 Phase 8 is under way, and Firefox Desktop now signs in and syncs against it for
 real: tokenserver, `meta/global`, `crypto/keys`, and uploads of clients, prefs,
 tabs, bookmarks, addons and history. The desktop settings below are what has
@@ -42,6 +46,57 @@ from the command line on the machine holding the database.
 uv run fxa-lite account list
 uv run fxa-lite account remove you@example.com
 ```
+
+## Docker
+
+The machine a household runs this on is usually a NAS or a small always-on box,
+where the unit of deployment is a container. The image makes the same promise as
+the CLI — one process, one file of state:
+
+```sh
+docker compose run --rm --interactive fxa-lite \
+    sh -c 'cat > /data/fxa.toml' < fxa.example.toml   # edit public_url first
+docker compose run --rm fxa-lite keygen
+docker compose run --rm -it fxa-lite account add you@example.com
+docker compose up -d
+```
+
+Everything lives in one volume mounted at `/data`: `fxa.toml`, `fxa.sqlite` and
+`signing-key.json`, found through `FXA_LITE_CONFIG=/data/fxa.toml` because
+relative paths in the config resolve against the directory holding it. Backup is
+a copy of that one directory, and there is nothing else to back up.
+
+Two things to get right:
+
+* **`public_url` is the external `https://` origin**, not the container's. The
+  container binds `0.0.0.0` — inside a network namespace `127.0.0.1` is
+  unreachable even by the healthcheck — and compose publishes `127.0.0.1:9000`
+  on the host, in front of whatever terminates TLS.
+* **`/data` must be a local filesystem.** SQLite over NFS or SMB has broken
+  locking, which is the one way to lose data here. A named volume on the box's
+  own disk is the safe default; a bind mount works too and has to be chowned to
+  uid 1000, the uid the container runs as.
+
+There is no entrypoint script, and it will not generate a signing key when one
+is missing: a container that silently mints a key after a volume failed to mount
+looks like it recovered while having invalidated every outstanding token. It
+exits 1 and tells you to run `keygen`, in a restart loop as on a laptop.
+
+`docker compose --profile tls up -d` additionally starts an nginx in front,
+configured by `deploy/nginx.conf.example` — copy it to `deploy/nginx.conf` and
+edit the four marked places. Certificates stay the host's job (`certbot certonly`
+plus a renewal hook that reloads the container); nothing here issues them. If you
+already run a proxy, use the example config with it directly and ignore the
+profile.
+
+`scripts/docker-smoke.sh` builds the image and drives the whole bootstrap
+against a throwaway volume, including the assertions that no deployment secret
+is in a layer and that `keygen` inside the container writes the key 0600 and
+owns it.
+
+Development is deliberately not containerised: `uv run fxa-lite serve --reload`
+is faster than any bind-mount-and-watch arrangement, and the JavaScript tests
+need `node`, which has no business in a deployment image.
 
 ## Pointing a browser at it
 

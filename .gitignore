@@ -14,3 +14,7 @@ fxa.toml
 *.sqlite-shm
 signing-key.json
 retired-key.json
+
+# The edited copy of deploy/nginx.conf.example: it names your hostname and the
+# paths to your certificates.
+deploy/nginx.conf
