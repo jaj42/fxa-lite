@@ -171,8 +171,15 @@ def _exempt_from_expiry(path: str) -> bool:
     The suffix alone would also match `/1.5/{uid}/storage/info/collections` —
     a BSO called `collections` in a collection called `info` — which is a
     writable resource and must not be reachable with a dead token.
+
+    Only the leading slash is stripped, so a trailing one leaves a fifth,
+    empty segment and fails the length test.  That is upstream's own boundary
+    — `is_info_collections_path` splits on `trim_start_matches('/')` and
+    `auth.rs` asserts `/1.5/123/info/collections/` is *not* exempt — and it
+    holds here whether or not the router is still redirecting trailing slashes
+    before a request ever reaches this function.
     """
-    segments = path.strip("/").split("/")
+    segments = path.lstrip("/").split("/")
     return (
         len(segments) == 4
         and segments[0] == "1.5"

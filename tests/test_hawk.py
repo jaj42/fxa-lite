@@ -14,13 +14,14 @@ string for a reason.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from typing import TypedDict
 
 import pytest
 
 from fxa_lite.syncstorage import hawk
-from fxa_lite.syncstorage.credentials import parse_token
+from fxa_lite.syncstorage.credentials import _exempt_from_expiry, parse_token
 from fxa_lite.tokenserver import tokenlib
 from vectors import load
 
@@ -234,3 +235,94 @@ def test_the_payload_hash_ignores_content_type_parameters():
     assert hawk.payload_hash(body, "text/plain; charset=utf-8") == hawk.payload_hash(
         body, "TEXT/PLAIN"
     )
+
+
+@pytest.mark.parametrize(
+    ("path", "exempt"),
+    [
+        ("/1.5/123/info/collections", True),
+        # The writable storage route shares the suffix: a BSO `collections` in
+        # a collection `info`, which must not be reachable on a dead token.
+        ("/1.5/123/storage/info/collections", False),
+        ("/1.5/123/storage/bookmarks/abc", False),
+        # A trailing slash leaves a fifth, empty segment. Upstream asserts this
+        # case too, and only the leading slash is stripped here so that it holds
+        # whether or not the router still redirects a trailing slash first.
+        ("/1.5/123/info/collections/", False),
+        ("/1.5/123/info/collections/extra", False),
+        ("/1.5//info/collections", False),
+        ("/1.6/123/info/collections", False),
+        ("/info/collections", False),
+    ],
+)
+def test_only_info_collections_survives_expiry(path, exempt):
+    """`is_info_collections_path`, assertion for assertion. See `auth.rs`."""
+    assert _exempt_from_expiry(path) is exempt
+
+
+# --------------------------------------------------------------------------
+# The specification's own worked examples.
+#
+# Everything above pins fxa-lite to syncstorage-rs, which proves the two agree
+# but not that either is right: a normalized string with the wrong field order
+# verifies perfectly against a fixture built by the same wrong code. The HAWK
+# specification (`resources/hawk_api.md`) publishes three known answers — a MAC
+# with no payload hash, a payload hash, and a MAC that covers one — computed by
+# the reference JavaScript implementation. They are the only cross-implementation
+# check of the normalized string that exists, and nothing here derives from them.
+# --------------------------------------------------------------------------
+
+SPEC = load("hawk_spec")
+SPEC_KEY = SPEC["credentials"]["key"]
+SPEC_PAYLOAD = SPEC["payload"]
+SPEC_REQUESTS = {case["name"]: case for case in SPEC["requests"]}
+
+
+def _spec_header(case: dict) -> hawk.HawkHeader:
+    return hawk.HawkHeader(
+        id=SPEC["credentials"]["id"],
+        ts=case["ts"],
+        nonce=case["nonce"],
+        mac=case["mac"],
+        hash=case["hash"],
+        ext=case["ext"],
+    )
+
+
+@pytest.mark.parametrize("name", sorted(SPEC_REQUESTS))
+def test_the_specification_normalized_string_is_ours(name):
+    """Byte for byte, including the empty `hash` line and the trailing newline."""
+    case = SPEC_REQUESTS[name]
+    normalized = hawk.normalized(_spec_header(case), **_request(case))
+    assert normalized == case["normalized"].encode()
+
+
+@pytest.mark.parametrize("name", sorted(SPEC_REQUESTS))
+def test_the_specification_macs_verify(name):
+    case = SPEC_REQUESTS[name]
+    header = _spec_header(case)
+    assert hawk.mac(SPEC_KEY, header, **_request(case)) == case["mac"]
+    signed_body = bool(case["hash"])
+    hawk.verify(
+        header,
+        SPEC_KEY,
+        now=case["ts"],
+        body=SPEC_PAYLOAD["body"].encode() if signed_body else None,
+        content_type=SPEC_PAYLOAD["content_type"] if signed_body else "",
+        **_request(case),
+    )
+
+
+@pytest.mark.parametrize("name", sorted(SPEC_REQUESTS))
+def test_the_specification_headers_parse_to_their_artifacts(name):
+    """The header lines as the specification prints them, attributes and all."""
+    case = SPEC_REQUESTS[name]
+    assert hawk.parse(case["header"]) == _spec_header(case)
+
+
+def test_the_specification_payload_hash():
+    digest = hawk.payload_hash(SPEC_PAYLOAD["body"].encode(), SPEC_PAYLOAD["content_type"])
+    assert digest == SPEC_PAYLOAD["hash"]
+    # And the string that was hashed, which is what a field-order slip moves.
+    hashed = hashlib.sha256(SPEC_PAYLOAD["hashed"].encode()).digest()
+    assert base64.b64encode(hashed).decode() == SPEC_PAYLOAD["hash"]
