@@ -155,13 +155,22 @@ All five are in the README's **Security** section, under *Accepted, with the rea
   so the verifier may be retried until the code expires. Guessing a 43-character verifier's SHA-256
   preimage in 15 minutes is not a threat.
 
-## Noted, not fixed
+## Noted, then fixed — the one item this section used to hold
 
-- **HAWK signs the decoded path.** `request.url.path` is `scope["path"]`, percent-decoded, where
-  syncstorage-rs signs the raw target. `BSO_ID_RE` admits `%`, ` ` and `#`, so an id containing one
-  would fail verification. No shipping client uses such an id (Sync ids are GUIDs and base64url),
-  and MAC and routing read the same decoded string, so there is no escalation — an interop edge,
-  not a security one.
+- **HAWK signed the decoded path.** `request.url.path` is `scope["path"]`, percent-decoded, where
+  syncstorage-rs signs the raw target (`uri.path_and_query()`). `BSO_ID_RE` admits `%`, ` ` and
+  `#`, so an id containing one failed verification. It was filed here rather than above because
+  it is an interop edge and not a security one: no shipping client mints such an id (Sync ids are
+  GUIDs and base64url), and MAC and routing read the same decoded string, so nothing could be
+  smuggled between them.
+
+  *Fixed in phase 15:* `syncstorage._signed_target` reads `scope["raw_path"]`, so the MAC covers
+  the target as sent. Two tests hold it in place — one that a record id needing escapes round
+  trips, and one that a signature computed over the *decoded* target is refused, which is the
+  assertion that fails if this is ever reverted. What is left is narrower and now carries its own
+  marker (`bso-id-with-a-slash-unroutable`): an id containing `/` has no per-record URL here,
+  because Starlette routes on the decoded path where actix splits the raw one. Such a record can
+  still be written, read and deleted — through the body and through `?ids=`.
 
 ## Addendum — the refresh-token auth scheme, audited after the fact
 

@@ -38,12 +38,25 @@ ASSET_DIR = Path(__file__).parent / "assets"
 #: The routes Firefox navigates to by itself. `/authorization` and
 #: `/oauth/signin` are the reference's own names for the OAuth sign-in page;
 #: `/signin` is what a person types.
+#:
+#: The last two are not navigations a person makes and not paths discovery
+#: names: `fxa-client`, the Rust crate every mobile build embeds, builds them
+#: from `content_url` and a string literal (`internal/config.rs`).
+#: `oauth/force_auth` is the *re-authentication* entry — `begin_oauth_flow`
+#: opens it instead of `authorization_endpoint` whenever the account has seen
+#: a profile but holds no session token, which is the state an account is left
+#: in when it is asked to sign in again. A 404 there is a phone that cannot
+#: recover. `pair/supp` is the supplicant half of QR pairing, which fxa-lite
+#: does not do; the page that says so is a better answer than a dead URL,
+#: exactly as `/pair` already is.
 PAGE_PATHS = (
     "/",
     "/signin",
     "/oauth/signin",
+    "/oauth/force_auth",
     "/authorization",
     "/pair",
+    "/pair/supp",
     "/connect_another_device",
     "/settings",
 )

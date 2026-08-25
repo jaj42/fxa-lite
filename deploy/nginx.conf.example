@@ -136,6 +136,12 @@ server {
     # or adds a prefix invalidates every signature simultaneously, which
     # presents as sync failing with 401 long after sign-in worked.  Whatever
     # terminates TLS must be the origin `public_url` names, exactly.
+    #
+    # `proxy_pass` with no URI part is load bearing for a second reason: it
+    # forwards the request target byte for byte, escapes included, and the MAC
+    # covers those bytes.  Give it a URI ("http://fxa_lite/") and nginx
+    # normalises the path it sends, which is invisible until a record id
+    # contains something that had to be escaped.
     location / {
         proxy_pass http://fxa_lite;
     }

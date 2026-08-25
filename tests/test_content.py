@@ -56,6 +56,20 @@ async def test_the_mobile_oauth_redirect_lands_somewhere(http: httpx.AsyncClient
     assert response.content == content.SHELL.body
 
 
+async def test_the_paths_the_rust_client_builds_itself_are_all_served() -> None:
+    """`fxa-client` joins some content paths from a literal, not from discovery.
+
+    `internal/config.rs` has one method per page it may open, and four of them
+    are reachable from a signed-in phone: `connect_another_device`, `pair`,
+    `pair/supp` and `oauth/force_auth` — the last being where
+    `begin_oauth_flow` sends a re-authentication, in place of the
+    `authorization_endpoint` that discovery does name. Discovery cannot fix a
+    404 on any of them, so they are pinned here by the name upstream uses.
+    """
+    for path in ("/connect_another_device", "/pair", "/pair/supp", "/oauth/force_auth"):
+        assert path in content.PAGE_PATHS
+
+
 async def test_the_shell_carries_the_headers_a_password_page_needs(
     http: httpx.AsyncClient,
 ) -> None:

@@ -80,7 +80,11 @@ def test_decode_jwt_header_raises_only_jwt_error(token: str) -> None:
 
 @given(
     st.dictionaries(
-        st.text(min_size=1, max_size=20),
+        # Not the two claims `verify_jwt` reads: a generated `exp` is either a
+        # non-number, which it is right to reject, or an expiry in the past,
+        # which it is right to enforce. Both are checked deliberately below;
+        # here they would only be an unreliable way of checking them.
+        st.text(min_size=1, max_size=20).filter(lambda name: name not in ("exp", "iat")),
         st.text(max_size=40) | st.integers() | st.booleans() | st.none(),
         max_size=8,
     )

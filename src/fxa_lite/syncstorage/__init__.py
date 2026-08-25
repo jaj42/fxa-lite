@@ -100,7 +100,7 @@ async def _authenticate(request: Request, uid: int, *, read_body: bool) -> SyncR
         header=request.headers.get("authorization"),
         secret=secret,
         method=request.method,
-        resource=request.url.path + (f"?{query}" if query else ""),
+        resource=_signed_target(request) + (f"?{query}" if query else ""),
         path=_mount_relative(request),
         origin=credentials.Origin.parse(config.public_url),
         now=now_ms // 1000,
@@ -124,6 +124,32 @@ async def _authenticate(request: Request, uid: int, *, read_body: bool) -> SyncR
         request=request,
         body=body,
     )
+
+
+def _signed_target(request: Request) -> str:
+    """The request target as the client put it on the wire, escapes intact.
+
+    HAWK signs bytes, so the MAC has to be checked against the bytes that were
+    sent: `request.url.path` is `scope["path"]`, which the server has already
+    percent-decoded, and a record id that needed an escape would then be
+    verified against a string no client ever signed. Upstream reads
+    `uri.path_and_query()`, which actix leaves encoded, and its BSO extractor
+    splits that same raw path before decoding the segment
+    (`extractors/bso_param.rs`); this is the first half of that.
+
+    `raw_path` is optional in ASGI. Every server this runs under sets it — and
+    sets it to the path alone, the query string already split off — but the
+    fallback is the decoded path rather than a crash, because a target with
+    nothing to decode is the overwhelming majority and refusing to serve it
+    would be the larger failure.
+    """
+    raw = request.scope.get("raw_path")
+    if raw is None:
+        return request.url.path
+    # Latin-1 never raises: a target is ASCII by the time a server has parsed
+    # it, and a non-ASCII byte that somehow survived becomes a character that
+    # re-encodes to something else, which fails the MAC rather than passing it.
+    return raw.decode("latin-1")
 
 
 def _mount_relative(request: Request) -> str:

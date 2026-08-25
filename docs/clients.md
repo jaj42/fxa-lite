@@ -81,37 +81,66 @@ Older builds call the first one *Custom Firefox Account server*. Leave *Custom
 Push server* empty — push notifications are out of scope, and the device
 routes say so in the protocol's own words rather than by failing.
 
-**Set both fields before signing in**, and set them on a profile that is not
-already signed in. Fenix reads them when it builds its account manager, and an
-account already connected to Mozilla's servers does not migrate.
+**Set the fields before signing in**, and set them on a profile that is not
+already signed in: an account that is already connected keeps the server it
+connected to, because its config travels in its own persisted state rather than
+being re-read from these preferences. Changing either field offers a *Quit
+application* button, and taking it is required — see
+[below](#what-the-source-settles), where the second field turns
+out not to be needed at all.
 
 A phone needs TLS before any of this: `crypto.subtle` again, and a phone has no
 loopback exemption to fall back on.
 
-### What is still unestablished
+### What the source settles
 
 Android **signs in and syncs** — tokenserver, `meta/global`, `crypto/keys`, and
 uploads of clients, prefs, tabs, bookmarks, addons and history. That is a
-result, not a reading of the code. Three narrower questions around it are not,
-and this page says so rather than guessing:
+result from a handset. The three questions that used to sit here were answered
+afterwards by reading the code that decides each one; each is a claim about a
+pinned commit rather than about a phone, and says which file it came from.
 
-*Whether the second field is needed at all.* The discovery document already
-advertises `sync_tokenserver_base_url`, so an app that prefers discovery when
-the override is blank would need one field, not two. Nobody has tried it with
-the field empty. Setting it costs nothing and is known to work, so it is still
-the instruction. What *is* settled is the spelling: the client normalises the
-override by trimming a trailing `/1.0/sync/1.5`
-(`Config::normalize_token_server_url` in `mozilla/application-services`), so the
-origin and the full URL are the same value to it, and neither can be the reason
-a sign-in fails.
+*The **Custom Sync server** field is not needed.* Fenix passes
+`overrideSyncTokenServer.ifEmpty { null }` into its `ServerConfig`
+(`fenix/.../components/FxaServer.kt`), and with no override
+`Config::token_server_endpoint_url` falls back to the
+`sync_tokenserver_base_url` this server advertises
+(`fxa-client/src/internal/config.rs`). What that URL then needs is supplied by
+`fixup_server_url` in `sync15`, which appends `/1.0/sync/1.5` to anything that
+does not already end in it — upstream's own unit test asserts that
+`https://selfhosted.example.com/token/` becomes
+`https://selfhosted.example.com/token/1.0/sync/1.5`, which is exactly the shape
+fxa-lite publishes. Every spelling of the field therefore ends at the same URL:
+blank, the origin, `<origin>/token`, or the full path, the last because the
+override is normalised by *trimming* a trailing `/1.0/sync/1.5`
+(`Config::normalize_token_server_url`). The table above keeps the full URL
+because that is the value a phone in this household actually synced with; blank
+is a reading, and it is the reading of three files that agree.
 
-*What the fields do to an already-signed-in profile.* Whether they require
-signing out first, and whether the app restarts, is untested. Sign out first.
+*The fields do nothing to an already-signed-in profile, and the app has to
+restart.* Both are read only where a **new** account is built:
+`StorageWrapper.account()` returns `AccountOnDisk.Restored` whenever there is
+saved state, and that state is rebuilt with `FirefoxAccount.fromJSONString`,
+whose persisted `StateV2` carries its own `config` — the server, and the
+tokenserver override, that the account signed in against. The prefs are not
+consulted on that path at all. And they are not consulted again in a running
+process: changing either one in Sync Debug reveals a *Quit application* item
+that calls `exitProcess(0)` (`SyncDebugFragment.kt`), which older builds did by
+themselves with the toast *"Mozilla account/Sync server modified. Quitting the
+application to apply changes…"*. So: sign out first, set the fields, let it
+quit, sign in.
 
-*Whether "Use New React Mozilla Account page" changes which path the app opens.*
-The content server answers a fixed table of paths, and a path outside it is a
-404 in a web view. The flow described here was seen with that setting at its
-default.
+*"Use New React Mozilla Account page" cannot open a path this server does not
+serve.* React and Backbone are two renderings of the **same** Express paths
+upstream: `routes/react-app/index.js` lists the route groups by name —
+`authorization`, `signin`, `oauth/signin` — and `add-routes.js` registers both
+apps on each path, picking React when `?showReactApp=true` or when the rollout
+flag is on. The lever is a query parameter, never a new path. The entry point
+is not the app's choice either: `begin_oauth_flow` opens the
+`authorization_endpoint` out of *our* `/.well-known/openid-configuration`, or,
+for a re-authentication, `<content_url>/oauth/force_auth` — a literal in
+`internal/config.rs` and one of four such literals, all of which
+`content/__init__.py:PAGE_PATHS` now serves.
 
 (fxa-lite id `a2270f727f45f648`, redirect `<public_url>/oauth/success/<client_id>`.)
 
@@ -120,8 +149,10 @@ default.
 Registered as an OAuth client (`1b1a3e44c54fbb58`) with the same redirect shape,
 because the client table came from upstream's and dropping it would have been a
 choice too. Whether a shipping build can be pointed at a custom account server
-at all is **unknown**: iOS has no `about:config` and no secret menu equivalent
-that has been found, and nobody has tried it against this server.
+at all is **unknown**, and unlike the Android questions above it is not a
+question the source can answer: iOS has no `about:config` and no secret menu
+equivalent that has been found, so the answer is whatever a build allows, and
+nobody here has an iPhone to try it on.
 
 Assume for now that it cannot. If you establish otherwise, the fields belong in
 the table at the top of this page.

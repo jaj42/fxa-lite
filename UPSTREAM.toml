@@ -100,6 +100,11 @@ paths = [
   "packages/fxa-content-server/app/scripts/models/auth_brokers",
   # The discovery document Firefox reads before anything else.
   "packages/fxa-content-server/server/lib/routes/get-fxa-client-configuration.js",
+  # Read to answer "can a client toggle open a path we do not serve": no.
+  # `index.js` groups the *same* route names under feature flags and
+  # `add-routes.js` registers React and Backbone on each of them, choosing
+  # between the two on `?showReactApp=true`.  The lever is a query parameter.
+  "packages/fxa-content-server/server/lib/routes/react-app",
   # The about:config prefs phase 8 sets on a fresh profile.
   "packages/fxa-dev-launcher/profile.mjs",
 ]
@@ -221,7 +226,7 @@ url = "https://github.com/mozilla/application-services"
 branch = "main"
 commit = "7674e0cf977272c746eebee7c145c982e06cc6c4"
 date = "2026-08-25"
-took = "what Firefox for Android requires of the responses fxa-lite writes — the fxa-client Rust crate that every mobile build embeds, read after a phone that synced fine still offered to sign in"
+took = "what Firefox for Android requires of the responses fxa-lite writes — the fxa-client Rust crate that every mobile build embeds, read after a phone that synced fine still offered to sign in; then, in phase 15, what that crate does with an empty Sync Debug field, which content-server paths it builds from a literal, and how sync15 fixes up a tokenserver URL"
 paths = [
   # `ProfileResponse`: `avatar` is a plain `String`, so a profile document without
   # the key fails to parse and the phone never learns its own address.  Also the
@@ -230,11 +235,29 @@ paths = [
   # `get_profile` and its ETag cache — the caller of the above.
   "components/fxa-client/src/internal/profile.rs",
   # `userinfo_endpoint` comes from `.well-known/openid-configuration`, not from
-  # `fxa-client-configuration`; and `normalize_token_server_url` strips the
-  # `/1.0/sync/1.5` suffix, which is the answer to one of phase 8's four questions.
+  # `fxa-client-configuration`; `normalize_token_server_url` strips a
+  # `/1.0/sync/1.5` suffix from the override, and `token_server_endpoint_url`
+  # falls back to `sync_tokenserver_base_url` when there is no override — half
+  # of phase 15's answer, the other half being sync15's `fixup_server_url`.
+  # It is also where the content-server paths the client builds from a literal
+  # live: `oauth/force_auth`, `pair`, `pair/supp`, `connect_another_device`.
   "components/fxa-client/src/internal/config.rs",
+  # `begin_oauth_flow`: `authorization_endpoint` from discovery normally, and
+  # `oauth_force_auth_url()` — a literal, not a discovered value — whenever the
+  # account has a profile but no session token.  A 404 there is a phone that
+  # cannot re-authenticate, which is why `PAGE_PATHS` serves it.
+  "components/fxa-client/src/internal/oauth.rs",
+  # `StateV2.config`: the persisted account carries the server it signed in
+  # against, so `from_json` restores that and not the app's current settings.
+  "components/fxa-client/src/internal/state_persistence.rs",
   # Where a failed `get_profile` lands the account: `AuthIssues`, not a retry.
   "components/fxa-client/src/state_machine",
+  # `fixup_server_url`, and the unit test that pins it: the tokenserver URL is
+  # given `/1.0/sync/1.5` if it does not already end in it, whether it came
+  # from discovery or from a self-hoster's override.  That is why Fenix's
+  # *Custom Sync server* field is not needed — the answer to the first of
+  # phase 8's four questions, closed in phase 15.
+  "components/sync15/src/client/token.rs",
 ]
 
 [[repo]]
@@ -265,7 +288,7 @@ url = "https://github.com/mozilla-mobile/firefox-android"
 branch = "main"
 commit = "fe8a71cd70ad5674abe1824fe11dc78372b736c2"
 date = "2024-06-17"
-took = "the Kotlin half of the answer to a force-close: which FxA errors android-components treats as recoverable, and which line of Fenix polls the route that raised one"
+took = "the Kotlin half of the answer to a force-close: which FxA errors android-components treats as recoverable, and which line of Fenix polls the route that raised one; and in phase 15 the Kotlin half of the Sync Debug fields — where the two preferences are read, and where a restored account stops reading them"
 paths = [
   # `shouldPropagate()`: the allow-list of recoverable `FxaException`s, ending
   # `else -> true`.  `Forbidden` is not on it and has no typealias here, which
@@ -289,4 +312,16 @@ paths = [
   # `viewLifecycleOwner.lifecycleScope.launch` — the coroutine with no handler
   # that the rethrown exception escapes from.  This is the *Sync now* button.
   "fenix/app/src/main/java/org/mozilla/fenix/settings/account/AccountSettingsFragment.kt",
+  # The three files behind phase 15's answers about the Sync Debug fields.
+  # `FxaServer.config()` builds the `ServerConfig` from the two preferences and
+  # passes `overrideSyncTokenServer.ifEmpty { null }`, so an empty field is no
+  # override at all and discovery decides.
+  "fenix/app/src/main/java/org/mozilla/fenix/components/FxaServer.kt",
+  # `SyncDebugFragment`: editing either field reveals the *Quit application*
+  # preference, which is `exitProcess(0)`.  The app has to restart; it offers.
+  "fenix/app/src/main/java/org/mozilla/fenix/settings/SyncDebugFragment.kt",
+  # `StorageWrapper.account()`: saved state is `AccountOnDisk.Restored`, rebuilt
+  # from JSON whose persisted config carries its own server — which is why the
+  # preferences do nothing to an account that is already signed in.
+  "android-components/components/service/firefox-accounts/src/main/java/mozilla/components/service/fxa/AccountStorage.kt",
 ]

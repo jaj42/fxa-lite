@@ -29,6 +29,24 @@ from typing import Any
 from . import errors
 from .store import SORTINGS, BsoQuery, Offset, quantize
 
+# DIVERGENCE: bso-id-with-a-slash-unroutable — a record id containing `/` has no URL
+#   upstream: `extractors/bso_param.rs` splits the *raw* path on `/`, requires
+#     six elements, and percent-decodes the sixth. `%2F` inside an id is
+#     therefore an ordinary character, and `/1.5/1/storage/bookmarks/a%2Fb`
+#     addresses the record whose id is `a/b`.
+#   fxa-lite: the router matches `scope["path"]`, which the server decoded
+#     before we saw it, so that same target is seven segments and 404s. Every
+#     other escape works: the MAC covers the raw target (`_signed_target`) and
+#     the id is validated after decoding, exactly as upstream validates it.
+#   why: the routing is Starlette's, and the alternative is to dispatch the
+#     storage tier off the raw path ourselves — a second router beside the
+#     framework's — to reach ids no Sync client mints. Sync ids are GUIDs and
+#     base64url; the `/` case is reachable only by hand.
+#   cost: nothing can be stored that cannot be read back. Such a record is
+#     created through POST, where the id is in the body rather than the URL,
+#     and listed, fetched and deleted through `?ids=`, where it is in the query
+#     string. Only the per-record URL cannot name it.
+
 #: `BSO_ID_REGEX` — any printable ASCII, up to 64 characters.
 BSO_ID_RE = re.compile(r"^[ -~]{1,64}$")
 #: `COLLECTION_ID_REGEX`.

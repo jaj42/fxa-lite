@@ -243,6 +243,93 @@ async def test_a_tampered_body_is_refused(storage: SyncStorageClient, http) -> N
     assert response.status_code == 401
 
 
+async def test_an_id_that_needs_escaping_round_trips(storage: SyncStorageClient) -> None:
+    """The MAC covers the target as sent, so an escaped id verifies and routes.
+
+    `BSO_ID_RE` is upstream's, and admits any printable ASCII — a space, a
+    percent sign, a hash. None of those survive a URL untouched, so this is
+    the case that used to fail: the client signs `a%20b%25c%23d`, and a server
+    that verified against the decoded path would be checking a string the
+    client never signed.
+    """
+    escaped = "a%20b%25c%23d"
+    decoded = "a b%c#d"
+
+    written = await storage.put(
+        f"/storage/bookmarks/{escaped}", json_body={"payload": "kept"}
+    )
+    assert written.status_code == 200
+
+    read = await storage.get(f"/storage/bookmarks/{escaped}")
+    assert read.status_code == 200
+    assert read.json()["payload"] == "kept"
+    # Stored under the decoded id, which is the id the client believes it used.
+    assert read.json()["id"] == decoded
+
+    listed = await storage.get("/storage/bookmarks")
+    assert listed.json() == [decoded]
+
+    gone = await storage.delete(f"/storage/bookmarks/{escaped}")
+    assert gone.status_code == 200
+    assert (await storage.get("/storage/bookmarks")).json() == []
+
+
+async def test_a_signature_over_the_decoded_target_is_refused(
+    storage: SyncStorageClient, http
+) -> None:
+    """The other direction: signing what the escapes *mean* is not signing them.
+
+    This is the assertion that pins the fix rather than the behaviour around
+    it. Upstream reads `uri.path_and_query()`, which actix leaves encoded; if
+    this server ever went back to `request.url.path` the test above would still
+    pass — both halves would decode — and only this one would fail.
+    """
+    escaped = f"{storage.prefix}/storage/bookmarks/a%20b"
+    header = hawk_storage_header(
+        token_id=storage.token_id,
+        key=storage.key,
+        method="GET",
+        resource=f"{storage.prefix}/storage/bookmarks/a b",
+        host=storage.host,
+        port=storage.port,
+    )
+    response = await http.get(escaped, headers={"authorization": header})
+    assert response.status_code == 401
+
+
+async def test_an_id_containing_a_slash_has_no_url_but_is_not_lost(
+    storage: SyncStorageClient,
+) -> None:
+    """`bso-id-with-a-slash-unroutable`, stated as the two halves it has.
+
+    Upstream splits the raw path and decodes the last element, so `%2F` is an
+    ordinary character there. Starlette matches on the path the server already
+    decoded, so the same target is one segment too long and nothing routes.
+    What the divergence must not cost is the record itself: it goes in through
+    the body and comes back through the query string.
+    """
+    unroutable = "folder/child"
+
+    stored = await storage.post(
+        "/storage/bookmarks", json_body=[{"id": unroutable, "payload": "kept"}]
+    )
+    assert stored.json()["success"] == [unroutable]
+
+    listed = await storage.get("/storage/bookmarks", params={"ids": unroutable})
+    assert listed.json() == [unroutable]
+    full = await storage.get(
+        "/storage/bookmarks", params={"ids": unroutable, "full": "1"}
+    )
+    assert full.json()[0]["payload"] == "kept"
+
+    # The per-record URL is the half that cannot be spelled.
+    assert (await storage.get("/storage/bookmarks/folder%2Fchild")).status_code == 404
+
+    removed = await storage.delete("/storage/bookmarks", params={"ids": unroutable})
+    assert removed.status_code == 200
+    assert (await storage.get("/storage/bookmarks")).json() == []
+
+
 async def test_a_token_cannot_be_spent_against_another_uid(
     storage: SyncStorageClient, http
 ) -> None:

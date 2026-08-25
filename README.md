@@ -42,11 +42,13 @@ Phase 8 is done: **Firefox Desktop and Firefox for Android both sign in and sync
 against it for real** — tokenserver, `meta/global`, `crypto/keys`, and uploads of
 clients, prefs, tabs, bookmarks, addons and history. Everything in *Pointing a
 browser at it* below is what has been seen to work rather than what the code
-implies, with one gap named where it appears: on Android nobody has isolated
-whether *Custom Sync server* is required or whether the account origin's
-discovery document covers it, so both fields are still the instruction. A phone
-needs TLS before any of it, because the sign-in page needs a secure context
-(see below). Firefox for iOS remains untested.
+implies. Where a reading is all there is, it says so: on Android the *Custom
+Sync server* field turns out not to be required — the client falls back to the
+`sync_tokenserver_base_url` this server advertises and appends `/1.0/sync/1.5`
+to it itself — but the instruction keeps the field, because that is the value a
+phone has actually synced with. A phone needs TLS before any of it, because the
+sign-in page needs a secure context (see below). Firefox for iOS remains
+untested, and unlike the Android questions it is not one the source can settle.
 
 ## Usage
 
@@ -168,7 +170,9 @@ not the same shape, which is the thing that catches people out: the account
 field is an **origin**, and the app reads the same discovery document from it
 that desktop does, while the sync field is a **full tokenserver URL** with the
 `/1.0/sync/1.5` on the end. Leave *Custom Push server* empty — push
-notifications are out of scope — and set both fields before signing in.
+notifications are out of scope — and set the fields before signing in: an
+account that is already connected keeps the server it connected to, and
+changing either field asks the app to quit so the new values are read.
 Discovery already advertises `sync_tokenserver_base_url`, so the second field
 may well be redundant; that has not been tested, and setting it costs nothing.
 

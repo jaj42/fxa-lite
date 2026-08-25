@@ -1721,6 +1721,98 @@ force-closed the browser. The server log ends on a clean pair of 200s and one 40
 
 946 tests, `ruff check` and `ty check` clean.
 
+### Phase 15 — three answers from the client's own source, and the id that had no URL ✅ done
+
+Two pieces of unfinished business, and they turn out to be the same kind of work: reading the
+code on the other side of the wire, which is what phases 13 and 14 each ended by recommending.
+
+**The three Fenix questions phase 8 opened are closed, and none of them needed a handset.**
+Phase 12 left them in `docs/clients.md` as open, which was honest and was also an admission that
+nobody had looked. Each is decided by one file:
+
+- **The *Custom Sync server* field is not needed.** `FxaServer.config()` passes
+  `overrideSyncTokenServer.ifEmpty { null }`, so a blank field is `None` and not `Some("")`;
+  `Config::token_server_endpoint_url` then falls back to `sync_tokenserver_base_url` out of our
+  own discovery document. The step that made this look impossible is `fixup_server_url` in
+  `sync15/src/client/token.rs`, which was the missing half: it appends `/1.0/sync/1.5` to any
+  tokenserver URL that does not already end in it, and its own unit test asserts that
+  `https://selfhosted.example.com/token/` becomes `https://selfhosted.example.com/token/1.0/sync/1.5`
+  — fxa-lite's exact shape, written down by upstream as a self-hosting case. Every spelling of
+  the field lands on the same URL, blank included. The documented instruction keeps the full URL,
+  because that is the value a phone in this household has actually synced with and a reading does
+  not outrank a result; what changes is that the page now says which of the two it is.
+- **Neither field does anything to an account that is already signed in.** `StorageWrapper.account()`
+  returns `AccountOnDisk.Restored` whenever there is saved state, rebuilt through
+  `FirefoxAccount.fromJSONString`, and the persisted `StateV2` carries its own `config` — the
+  server *and* the tokenserver override the account signed in against. The preferences are read
+  only on the `New` branch. They are also not re-read in a running process: editing either one
+  reveals a *Quit application* item that is `exitProcess(0)`, which older builds did unasked with
+  a toast. "Sign out first" was the right advice; now it has a reason attached rather than a
+  shrug.
+- **The React toggle cannot open a path we do not serve.** React and Backbone are two renderings
+  of the *same* Express paths: `routes/react-app/index.js` groups route *names* under feature
+  flags and `add-routes.js` registers both apps on each, choosing on `?showReactApp=true`. The
+  lever is a query parameter. And the entry point is not the app's to choose: `begin_oauth_flow`
+  opens the `authorization_endpoint` from our own `openid-configuration`.
+
+**That last reading found the bug the question was circling, one step further on.** The same
+function opens `oauth_force_auth_url()` instead — a *literal* joined to `content_url`, not a
+discovered value — whenever the account has seen a profile but holds no session token, which is
+the state an account is left in when it is asked to authenticate again. `/oauth/force_auth` was
+not in `PAGE_PATHS`, so a phone that needed to re-authenticate would have found a 404 where its
+sign-in page should be. `internal/config.rs` has four such literals; `pair/supp` was the other
+one missing, and it now answers with the same "pairing needs a channel server" page `/pair`
+already answers with. No client had reached either yet: the failure is the kind that waits for
+the worst day, which is what makes it worth fixing on an ordinary one. The prefilled `?email=`
+that force_auth carries is already handled — the shell has read that parameter since phase 4.
+
+**`AUDIT.md`'s one "noted, not fixed" item is fixed.** HAWK signed `request.url.path`, which the
+server has already percent-decoded, where syncstorage-rs signs `uri.path_and_query()` with its
+escapes intact. `syncstorage._signed_target` now reads `scope["raw_path"]` — optional in ASGI,
+supplied by uvicorn, Starlette's TestClient and httpx's ASGITransport alike, and always with the
+query already split off — so the MAC covers the bytes the client signed. The conformance client
+had been signing `url.raw_path` all along, as a real client does; the two only agreed because no
+test had ever escaped anything.
+
+- **What was actually wrong was one layer deeper than "an id with a space fails".** Upstream's
+  `extractors/bso_param.rs` splits the *raw* path on `/`, requires six elements, and decodes the
+  sixth. So it signs raw, routes raw, and decodes last. fxa-lite now signs raw and decodes at the
+  same point upstream does — but routes on the decoded path, because that is what Starlette
+  matches on.
+- **So the divergence narrowed rather than vanished, and the marker says so.**
+  `hawk-signs-decoded-path` is gone; `bso-id-with-a-slash-unroutable` replaces it. An id
+  containing `/` has no per-record URL here — `%2F` decodes before routing and the target is one
+  segment too long. Nothing is lost: such a record is written through POST, where the id is in
+  the body, and listed, fetched and deleted through `?ids=`, where it is in the query string.
+  A test says exactly that, so the cost line is a fact and not a hope.
+- **The test that matters is the one that fails on a revert.** A round-trip of
+  `a%20b%25c%23d` passes either way once both halves decode; what pins the fix is the request
+  signed over the *decoded* target and refused. Both were checked against the old code first:
+  round-trip 401, decoded-signature 404 instead of 401.
+- **The manifest gained five paths and two `took` lines.** `sync15/src/client/token.rs` (which
+  meant widening a sparse checkout), `internal/oauth.rs` and `internal/state_persistence.rs` in
+  `application-services`; `FxaServer.kt`, `SyncDebugFragment.kt` and `AccountStorage.kt` in the
+  archived `firefox-android`; and `routes/react-app` in `mozilla/fxa`. Three answers about a
+  client are three claims about specific commits, which is the whole point of the file.
+
+- **Two things found on the way past, both one line.** `deploy/nginx.conf.example` already used
+  `proxy_pass http://fxa_lite;` with no URI part, which is what forwards the target byte for
+  byte — that was luck rather than intent, so it now says so and `test_docker.py` asserts it of
+  every `proxy_pass` in the file. And `test_jose_properties.py` had a latent flake: its claims
+  strategy could generate `exp`, so hypothesis was free to discover that an expired token is
+  refused and call it a round-trip failure. The reserved names are excluded; the two tests that
+  check them deliberately are three lines below.
+
+**What this says about the rule the last two phases have been narrowing.** Phase 13: a trace
+establishes what was asked for, not what was understood. Phase 14: a claim that an answer is
+legible has to name who is reading. This phase adds the cheap half of both — the client's source
+answers questions about the client, and three of the four things phase 8 left for "one session
+with a handset" were a morning's reading. The one that is not is iOS, and it is not because its
+answer is not in any source: it depends on what a shipping build permits, and nobody here has the
+device. That one stays open, and stays labelled unknown.
+
+953 tests (was 946), `ruff check`, `ty check` and `sphinx-build -W` clean.
+
 ---
 
 ## Verification

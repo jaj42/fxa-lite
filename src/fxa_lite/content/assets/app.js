@@ -379,7 +379,7 @@ async function main() {
     return;
   }
 
-  if (path === '/pair' || path === '/connect_another_device') {
+  if (path === '/pair' || path.startsWith('/pair/') || path === '/connect_another_device') {
     render(
       ...unavailableView(
         'Not available',

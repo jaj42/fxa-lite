@@ -154,6 +154,19 @@ def test_nginx_allows_a_full_sync_batch() -> None:
     assert int(match.group(1)) * scale >= LIMITS.max_request_bytes
 
 
+def test_nginx_passes_the_request_target_unrewritten() -> None:
+    """Every `proxy_pass` is host-only: no URI part, so nothing is normalised.
+
+    HAWK covers the target as sent, escapes included (`syncstorage._signed_target`).
+    Giving `proxy_pass` a URI makes nginx rebuild the path it forwards, which
+    would be invisible until a record id contained something that had to be
+    escaped — and would then look like a signing bug in the client.
+    """
+    passes = re.findall(r"proxy_pass\s+(\S+);", NGINX.read_text())
+    assert passes, "deploy/nginx.conf.example proxies nothing"
+    assert all(target.count("/") == 2 for target in passes), passes
+
+
 def test_nginx_ships_the_rate_limit_uncommented() -> None:
     """The audit's F3 decision: the per-IP half is required, not suggested —
     behind a proxy the app sees every client as 127.0.0.1 and cannot do it."""

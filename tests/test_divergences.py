@@ -25,19 +25,22 @@ sys.path.insert(0, str(ROOT / "docs" / "_ext"))
 
 from divergence_scan import FIELDS, MarkerError, parse, scan  # noqa: E402
 
-#: Every divergence phase 10 collected, plus the ones phases 8, 11 and 13 added.
+#: Every divergence phase 10 collected, plus the ones phases 8, 11 and 13 added,
+#: less `hawk-signs-decoded-path`, which phase 15 stopped being true of the code:
+#: the MAC now covers the raw target, and what is left of that edge is the
+#: narrower `bso-id-with-a-slash-unroutable`.
 #: Sorted, because this is a set and not an order.
 EXPECTED = {
     "access-tokens-not-revocable",
     "acr-values-refused",
     "avatar-is-always-a-monogram",
     "batch-append-filters-id",
+    "bso-id-with-a-slash-unroutable",
     "device-commands-always-empty",
     "devices-notify-not-enabled",
     "failed-login-throttle",
     "hawk-macs-unverified",
     "hawk-payload-hash-verified",
-    "hawk-signs-decoded-path",
     "metrics-disabled",
     "no-retry-after-on-permanent-403",
     "no-v2-upgrade",
