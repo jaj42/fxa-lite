@@ -226,7 +226,7 @@ url = "https://github.com/mozilla/application-services"
 branch = "main"
 commit = "7674e0cf977272c746eebee7c145c982e06cc6c4"
 date = "2026-08-25"
-took = "what Firefox for Android requires of the responses fxa-lite writes — the fxa-client Rust crate that every mobile build embeds, read after a phone that synced fine still offered to sign in; then, in phase 15, what that crate does with an empty Sync Debug field, which content-server paths it builds from a literal, and how sync15 fixes up a tokenserver URL"
+took = "what Firefox for Android requires of the responses fxa-lite writes — the fxa-client Rust crate that every mobile build embeds, read after a phone that synced fine still offered to sign in; then, in phase 15, what that crate does with an empty Sync Debug field, which content-server paths it builds from a literal, and how sync15 fixes up a tokenserver URL; and in phase 16 the shape of a mobile *download* — which query a collection read actually carries, when the client decides not to send it at all, and where its high-water mark comes from"
 paths = [
   # `ProfileResponse`: `avatar` is a plain `String`, so a profile document without
   # the key fails to parse and the phone never learns its own address.  Also the
@@ -258,6 +258,65 @@ paths = [
   # *Custom Sync server* field is not needed — the answer to the first of
   # phase 8's four questions, closed in phase 15.
   "components/sync15/src/client/token.rs",
+  # `build_collection_request_url`: the whole vocabulary of a mobile collection
+  # read — `full=1` as a value, `ids` comma-joined, `older`, `newer`, and
+  # `sort` only ever alongside `limit`.  Also `Sync15ClientResponse::from_response`,
+  # where a 2xx without a parseable `X-Last-Modified` is a hard error, which is
+  # what makes that header load bearing on every storage route we serve.
+  "components/sync15/src/client/storage_client.rs",
+  # `synchronize_with_clients_engine`: download, then apply, then upload, in
+  # that order and within one engine.  That ordering is the deduction that
+  # closed phase 16 — a phone whose records reach the desktop has, by
+  # construction, already run its own download.  Also the two silent exits: a
+  # `get_collection_request` of `None` and a collection state of `None` both
+  # return `Ok(())` having fetched nothing.
+  "components/sync15/src/client/sync.rs",
+  # `LocalCollStateMachine`: `CollState.last_modified` is the *`info/collections`*
+  # value, not the engine's own mark and not the collection GET's header.
+  "components/sync15/src/client/coll_state.rs",
+  # `fetch_incoming` binds the GET's `X-Last-Modified` to `_timestamp` and drops
+  # it, which is why a record written between a phone's read and its own write
+  # is skipped for good.
+  "components/sync15/src/client/coll_update.rs",
+  # `CollectionRequest`/`RequestOrder`, and the comment that explains why `sort`
+  # travels with `limit`: "asking for the order of records only makes sense if
+  # you are limiting them".  There is no `offset` field, so the client cannot
+  # page — see the note at `get_bsos` in `syncstorage/store.py`.
+  "components/sync15/src/engine/request.rs",
+  # `Display for ServerTimestamp` is `self.0 as f64 / 1000.0`, so `newer=` is
+  # the shortest round-tripping form and not the two decimals `X-Last-Modified`
+  # always carries.  One instant, two spellings, both on the wire.
+  "components/sync15/src/server_timestamp.rs",
+  # `get_collection_request`: `since == server_timestamp` means the request is
+  # never made, and `LAST_SYNC_META_KEY` is written in `apply()` from that same
+  # `info/collections` value.  The bookmarks engine sends `full()` and
+  # `newer_than(since)` and nothing else.
+  "components/places/src/bookmark_sync/engine.rs",
+]
+
+# A full mozilla-central checkout, cloned while chasing a report that desktop
+# records were not reaching a phone.  It answered one question and it was a
+# negative: the Rust Sync client Fenix runs is *not* vendored here — there is no
+# `sync15` or `places` under `third_party/rust` — so the mobile side of that
+# investigation is `application-services` above, and Fenix's Kotlin is
+# `firefox-android` below.  Nothing in fxa-lite rests on this tree; it is pinned
+# because a checkout under `resources/` that the manifest does not describe is
+# exactly the provenance hole phase 7 exists to close, and "read and took
+# nothing" is a recorded answer where silence is not.
+[[repo]]
+dir = "firefox"
+url = "https://github.com/mozilla-firefox/firefox"
+branch = "main"
+commit = "39532fe5a7a63cf58953e0ce2e2e264c94313b12"
+date = "2026-08-26"
+took = "nothing — cloned in phase 16 to read Desktop's Sync engines and to check whether the Rust crates the phone runs are vendored alongside them. They are not, and Desktop was never the failing half; the entry records the look rather than a dependency"
+paths = [
+  # Desktop's Sync client, for contrast with the Rust one: this is where the
+  # collection reads that *do* carry `sort` and `limit` are built, and it is the
+  # half of the ecosystem fxa-lite had already been tested against.  Listed as
+  # the tree that was actually opened, so a rename shows up in the diff even
+  # though no constant was taken from it.
+  "services/sync/modules",
 ]
 
 [[repo]]

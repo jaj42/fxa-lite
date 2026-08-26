@@ -1813,6 +1813,109 @@ device. That one stays open, and stays labelled unknown.
 
 953 tests (was 946), `ruff check`, `ty check` and `sphinx-build -W` clean.
 
+### Phase 16 — the sync that was working ✅ done
+
+Reported from the household a third time, and the shape was the most alarming yet: records
+written on Firefox Desktop never reached the phone, while records written on the phone reached
+Desktop. Bookmarks first, then tabs — two independent engines, which ruled out a merger and
+pointed at the storage tier. **It was neither. Both directions were working the whole time, and
+what the report described was where each client files the other's records.** The desktop
+bookmarks were on the phone under *Desktop Bookmarks*; the desktop tabs were in the tab tray
+under *Desktop tabs*.
+
+That is a boring ending to a day of reading, and the reading is worth keeping anyway, because
+three of its findings are load bearing and one of them is the reason the question was expensive.
+
+- **The mobile download is a much narrower request than Desktop's.** The bookmarks engine issues
+  exactly `GET <api_endpoint>/storage/bookmarks?full=1&newer=<since>` — `sort` is emitted only
+  alongside `limit` (`sync15/src/client/storage_client.rs`, and the comment at
+  `engine/request.rs`: "asking for the order of records only makes sense if you are limiting
+  them"), and the bookmarks engine sets neither. There is no `offset` field on
+  `CollectionRequest` at all, so the client cannot page, and `X-Weave-Next-Offset` has no reader
+  anywhere in the crate.
+- **It issues even that only when `info/collections` disagrees with its stored mark**, compared
+  for exact equality (`places/src/bookmark_sync/engine.rs`). Equal means no request, no error, and
+  a sync that reports success. So "there is no `GET /storage/bookmarks` in the trace" is not
+  evidence that the server refused anything — which is the trap this phase would have walked into
+  had it gone to a trace first.
+- **Within one engine, download precedes upload** (`sync15/src/client/sync.rs`), and that is the
+  deduction that ended the investigation early: a phone whose bookmarks reach the desktop has, by
+  construction, already run its own bookmarks download. The server could not have been silently
+  returning nothing, because the phone was demonstrably completing the cycle that begins with
+  asking.
+- **`fxa-lite` was then checked against the arithmetic rather than the argument.** `newer` is a
+  strict `modified > ?`, which is what `newer_than(since)` assumes. The `X-Last-Modified` →
+  `newer=` round trip is exact — verified over 200 000 quantized instants in *both* spellings the
+  clients use, `f"{ms/1000:.2f}"` and `Display for ServerTimestamp`'s shortest round-tripping
+  form, with zero drift in either direction. Expiry is far-future on every write path including
+  the odd batch-commit one. Nothing was wrong.
+
+**What settled it was the database, in one query.** `sync inspect` (below) against the household's
+own file: one live Sync uid, nine bookmarks, and **three `tabs` records and three `clients`
+records for two devices** — both browsers uploading, both readable, plus one stale registration
+from an earlier sign-in. There was never a transport question to answer.
+
+**The gap this exposed is real and is now closed.** `?newer=` had never been driven through the
+HTTP tier — `grep -rn "newer" tests/` found store-level tests and prose and nothing else. The one
+request shape every mobile download uses had no test, so the only way to answer a report about it
+was to argue from a reading. `tests/test_sync_mobile_download.py` is that test: a `MobileEngine`
+that mirrors `get_collection_request` and where `apply()` writes its mark, replaying desktop
+write → phone sync → desktop write → phone sync, plus the skip rule, the phone not re-downloading
+its own upload, and both spellings of one instant selecting the same records. The conformance
+client grew `get_collection`, `info_collections` and `server_timestamp` — the client's spelling,
+not ours: `full=1` as a value rather than the bare `?full` the grammar also allows, `sort` only
+with `limit`, and the shortest-form timestamp.
+
+It is checked the way a test that could not fail would not be: five mutations were run against it
+first — `newer` as `>=`, `newer` ignored entirely, and `parse_timestamp` skewed a hundredth in
+each direction — and each is caught. The upward skew is the dangerous one, because it is the exact
+shape of the report, and `test_the_timestamp_a_write_returns_excludes_that_write` pins both sides
+of the boundary deterministically rather than depending on how fast two writes ran.
+
+**`fxa-lite sync inspect`** is new and is the tool the phase wanted on its first hour: per account,
+the Sync uid or uids with their client state and whether each is live or replaced, and per uid
+every collection with its record count and last write. Read-only, and deliberately not a route —
+"what is on the server" is the operator's question, not a client's. It names `tabs` and `clients`
+as one-per-device, because that count is what turns the next report into a one-line answer.
+
+**One divergence fixed and one edge written down.**
+
+- **`sort=none` was a 400 and is now accepted.** Upstream's `Sorting` enum has a `None` variant
+  under `#[serde(rename_all = "lowercase")]` (`syncstorage-db-common/src/lib.rs`), so the string
+  is legal on the wire, and `db_impl.rs` then matches it alongside `Sorting::Newest` in `get_bsos`
+  and lets it fall through the `_` arm in `get_bso_ids` — which is exactly what an absent `sort`
+  already did here. `parse_query` normalises it to the absent case rather than carrying a second
+  spelling. Neither client sends it; refusing it was a divergence with no argument behind it.
+- **`DEFAULT_LIMIT = 10_000` is upstream's `unwrap_or(DEFAULT_LIMIT)` and is therefore *not*
+  marked as a divergence** — the DIVERGENCE list means "fxa-lite decided differently", and
+  mislabelling parity would corrupt the one list phase 10 audits from. It is commented at
+  `get_bsos` anyway, because the edge is invisible and belongs to the whole ecosystem: the Rust
+  client does not page, so a collection past the cap is silently truncated for a phone, and a
+  truncated bookmark tree is unmergeable. Raising the cap would only move the cliff.
+
+**`docs/clients.md` gained the section that would have answered the report without a line of code
+being read** — where each client files the other's records, and where synced tabs live on a
+Desktop build with Firefox View disabled, which is what LibreWolf ships. `docs/running.md` and the
+README gained `sync inspect`.
+
+**`UPSTREAM.toml`** gained seven `application-services` paths (the `sync15` client and engine
+files above, `server_timestamp.rs`, and `places/src/bookmark_sync/engine.rs`) and a sixth… seventh
+repo, `mozilla-firefox/firefox` — a full mozilla-central checkout cloned to read Desktop's Sync
+engines, which took *nothing*: the Rust crates the phone runs are not vendored there. It is pinned
+because a checkout under `resources/` the manifest does not describe is the provenance hole phase 7
+exists to close, and `test_every_checkout_is_pinned` caught it on the first full run of this phase,
+which is the assertion doing exactly its job.
+
+**What this says about the rule the last three phases have been narrowing.** Phase 13: a trace
+establishes what was asked for, not what was understood. Phase 14: a claim that an answer is
+legible has to name who is reading. Phase 15: the client's source answers questions about the
+client. This one adds the cheapest of the four and the one nobody wrote down — **check that the
+thing is broken before asking why.** One query against the server's own database would have ended
+this in a minute, and there was no command that asked it. There is now.
+
+971 tests (was 953), `ruff check`, `ty check` and `sphinx-build -W` clean.
+
+
 ---
 
 ## Verification

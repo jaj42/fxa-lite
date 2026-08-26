@@ -297,6 +297,32 @@ along with it.
 `--password` exists and puts the password in your shell history and in the
 process list. Use it for scripts you have thought about and not otherwise.
 
+## What is actually on the server
+
+```sh
+uv run fxa-lite sync inspect
+```
+
+One block per account: its Sync uid or uids, and for each one every collection
+with its record count and when it last changed. It is read-only and it is the
+answer to the question a report from the household always turns out to be —
+"is the record there, and is the other device there".
+
+Three things it is worth knowing how to read:
+
+* **More than one Sync uid** means a key rotation happened. The old row is
+  marked `replaced`, its records stay where they are — unreadable under the new
+  key, and not deleted — and the browsers are all using the live one.
+* **`tabs` and `clients` are one record per device.** Two devices that are both
+  syncing are two records in each. One record is a real finding; three usually
+  means a device was signed out and its record has not aged out yet.
+* **A collection with a timestamp and no records** is what a wipe leaves
+  behind, and it is shown rather than hidden for that reason.
+
+Where each browser *files* the other's records — which is not the same question,
+and has so far been the answer more often — is in
+{doc}`clients`.
+
 **The password is the whole authenticator.** It is also, through PBKDF2 and
 HKDF, the key that encrypts Sync data: `kB` never leaves the browser in a form
 the server can read, so a forgotten password is unrecoverable and there is no

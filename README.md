@@ -67,6 +67,7 @@ from the command line on the machine holding the database.
 ```sh
 uv run fxa-lite account list
 uv run fxa-lite account remove you@example.com
+uv run fxa-lite sync inspect                   # what is in Sync storage, per account
 ```
 
 ## Docker

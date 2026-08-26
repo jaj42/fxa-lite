@@ -1,9 +1,9 @@
 """Command line entry point.
 
 `keygen` makes the signing key, `account` provisions the handful of accounts
-this server exists for, and `serve` runs the thing.  There is deliberately no
-signup page: adding a user is an administrative act on the machine that holds
-the database.
+this server exists for, `sync inspect` says what is in their Sync storage, and
+`serve` runs the thing.  There is deliberately no signup page: adding a user is
+an administrative act on the machine that holds the database.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import getpass
 import json
 import os
 import sys
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -21,8 +22,9 @@ from pathlib import Path
 from . import __version__, accounts, tracing
 from .config import LOG_LEVELS, Config, ConfigError, load
 from .crypto import jose
-from .db import Database, DatabaseError, open_database
+from .db import Database, DatabaseError, SyncUser, open_database
 from .errors import FxaError
+from .syncstorage.store import SyncStore, quantize
 
 DEFAULT_CONFIG = "fxa.toml"
 
@@ -106,6 +108,15 @@ def _parser() -> argparse.ArgumentParser:
         "-f", "--force", action="store_true", help="skip the confirmation prompt"
     )
     account_remove.set_defaults(handler=cmd_account_remove)
+
+    sync = sub.add_parser("sync", help="look at what is in Sync storage")
+    sync_sub = sync.add_subparsers(dest="sync_command", required=True)
+
+    sync_inspect = sync_sub.add_parser(
+        "inspect", help="per account, the Sync uid(s) and what each collection holds"
+    )
+    _add_config_argument(sync_inspect)
+    sync_inspect.set_defaults(handler=cmd_sync_inspect)
 
     return parser
 
@@ -230,6 +241,64 @@ def cmd_account_remove(args: argparse.Namespace) -> int:
         db.delete_account(account.uid)
     print(f"deleted {account.email}")
     return 0
+
+
+def cmd_sync_inspect(args: argparse.Namespace) -> int:
+    """What is actually stored, per account and per Sync uid.
+
+    This exists because the questions a household report raises are all the
+    same three, and none of them can be answered from a log: is there more than
+    one Sync uid (a key rotation retires the old one and its records stay
+    behind, unreadable), did a write land at all, and is each device present.
+    The last one is why `tabs` and `clients` are called out: both are one record
+    per device, so two devices that are syncing are two records, and one is a
+    finding rather than a shrug.
+
+    Read-only, and deliberately not a route: this is the answer to "what is on
+    the server", which is the operator's question, not a client's.
+    """
+    config: Config = load(args.config)
+    now = int(time.time() * 1000)
+    with _database(config) as db:
+        accounts_ = db.accounts()
+        if not accounts_:
+            print("no accounts; add one with `fxa-lite account add <email>`")
+            return 0
+        for index, account in enumerate(accounts_):
+            if index:
+                print()
+            print(f"{account.email}  {account.uid}")
+            users = db.sync_users(account.uid)
+            if not users:
+                print("  no Sync storage yet — this account has never synced")
+                continue
+            for user in users:
+                _print_sync_user(db, user, now)
+    return 0
+
+
+def _print_sync_user(db: Database, user: SyncUser, now: int) -> None:
+    state = "live" if user.replaced_at is None else f"replaced {_timestamp(user.replaced_at)}"
+    print(
+        f"  sync uid {user.uid}  client state {user.client_state}  "
+        f"created {_timestamp(user.created_at)}  ({state})"
+    )
+    store = SyncStore(db, user.uid, quantize(now))
+    timestamps = store.collection_timestamps()
+    if not timestamps:
+        print("    (no collections)")
+        return
+    counts = store.collection_counts()
+    width = max(len(name) for name in timestamps)
+    for name in sorted(timestamps):
+        # A collection can carry a timestamp and no records: that is what a wipe
+        # leaves behind, and hiding it would hide the wipe.
+        count = counts.get(name, 0)
+        note = "  <- one per device" if name in ("tabs", "clients") else ""
+        print(
+            f"    {name:<{width}}  {count:>6} record(s)  "
+            f"last written {_timestamp(timestamps[name])}{note}"
+        )
 
 
 @contextmanager

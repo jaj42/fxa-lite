@@ -853,6 +853,26 @@ def hawk_storage_header(
     return header
 
 
+def server_timestamp(milliseconds: int) -> str:
+    """A Sync timestamp spelled the way the Rust client spells it.
+
+    `sync15`'s `Display for ServerTimestamp` is `self.0 as f64 / 1000.0` under
+    `{}`, which is Rust's shortest form that round-trips — so `0` has no
+    decimals, `1234560` ms is `1234.56`, and `1787605352100` ms is
+    `1787605352.1` with *one*.  It is deliberately not `%.2f`: that is the
+    `X-Last-Modified` spelling, and pinning both against the same instant is
+    how we know the server reads them as the same moment.
+
+    Python's `repr` is also a shortest-round-trip form, so the two agree at
+    these magnitudes; the integral case is spelled out because Rust prints
+    `1234` where Python's `repr` prints `1234.0`.
+    """
+    seconds = milliseconds / 1000.0
+    if seconds == int(seconds):
+        return str(int(seconds))
+    return repr(seconds)
+
+
 class SyncStorageClient:
     """The storage half of a Sync client, signing every request itself.
 
@@ -948,6 +968,54 @@ class SyncStorageClient:
         if content_type is not None:
             sent["content-type"] = content_type
         return await self.http.request(method, url, content=body, headers=sent)
+
+    async def info_collections(self) -> tuple[dict[str, float], str | None]:
+        """`GET /info/collections` — the first call of every sync.
+
+        Returns the body *and* `X-Last-Modified`, because the Rust client
+        requires that header on every 2xx (`Error::MissingServerTimestamp`)
+        and a test that only read the body would not notice it going missing.
+        """
+        response = await self.get("/info/collections")
+        return expect_ok(response), response.headers.get("x-last-modified")
+
+    async def get_collection(
+        self,
+        collection: str,
+        *,
+        full: bool = True,
+        newer: str | None = None,
+        older: str | None = None,
+        ids: list[str] | None = None,
+        limit: int | None = None,
+        sort: str | None = None,
+    ) -> httpx.Response:
+        """A collection read spelled as `sync15` spells it.
+
+        `build_collection_request_url` sends `full=1` — a *value*, not the bare
+        `?full` the query grammar also allows — comma-joins `ids` and lets the
+        URL layer escape the commas, and emits `sort` only alongside `limit`,
+        because "asking for the order of records only makes sense if you are
+        limiting them".  The parameter order is upstream's too.  None of that
+        changes what a correct server answers, which is exactly why it is worth
+        sending: the shapes a client actually produces are the ones that have
+        to work.
+        """
+        params: dict[str, Any] = {}
+        if full:
+            params["full"] = "1"
+        if ids is not None:
+            params["ids"] = ",".join(ids)
+        if older is not None:
+            params["older"] = older
+        if newer is not None:
+            params["newer"] = newer
+        if limit is not None:
+            params["sort"] = sort or "oldest"
+            params["limit"] = str(limit)
+        elif sort is not None:
+            params["sort"] = sort
+        return await self.get(f"/storage/{collection}", params=params)
 
     async def get(self, path: str, **kwargs: Any) -> httpx.Response:
         return await self.request("GET", path, **kwargs)

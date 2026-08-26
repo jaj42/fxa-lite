@@ -61,6 +61,15 @@ TOMBSTONE = 0
 #: `sort` parameter and behaves as `newest` everywhere but `get_bso_ids`.
 SORTINGS = ("newest", "oldest", "index")
 
+#: `Sorting::None`, which is upstream's *default* variant and is spelled
+#: `sort=none` on the wire (`syncstorage-db-common`'s enum carries
+#: `#[serde(rename_all = "lowercase")]`).  It is accepted and then discarded:
+#: `db_impl.rs` matches `Sorting::Newest | Sorting::None` together in `get_bsos`
+#: and lets `None` fall through the `_` arm in `get_bso_ids`, which is exactly
+#: what an absent `sort` already does here.  Naming it separately keeps
+#: `SORTINGS` meaning "orders we can produce" rather than "strings we accept".
+SORT_NONE = "none"
+
 
 class StoreError(Exception):
     """Base for the conditions the HTTP tier turns into status codes."""
@@ -380,6 +389,21 @@ class SyncStore:
         # the token it gets back, not on the order it gets them in.
         order = orders.get(query.sort or ("newest" if full else ""), "")
 
+        # A request with no `limit` still gets one, which is upstream's own
+        # `unwrap_or(DEFAULT_LIMIT)` and therefore *not* a divergence — it is
+        # deliberately not marked as one, because the DIVERGENCE list means
+        # "fxa-lite decided differently" and this is parity. It is written down
+        # anyway because the edge it creates is invisible and shared with the
+        # whole ecosystem: the Rust client every mobile build embeds does not
+        # page. It reads `X-Weave-Next-Offset` nowhere (`sync15` has the header
+        # constant and no call site) and says so in a comment at
+        # `client/sync.rs` — "we just read them all in one request". So a
+        # collection past DEFAULT_LIMIT records is silently truncated for a
+        # phone, with no error on either side, and for bookmarks a truncated
+        # tree is unmergeable. Raising the cap here would only move the cliff
+        # and would put this server outside what clients have been tested
+        # against; the honest answer is that the limit is upstream's and the
+        # gap is the client's.
         limit = max(query.limit if query.limit is not None else DEFAULT_LIMIT, 0)
         numeric_offset = query.offset.offset if query.offset else 0
         columns = "id, modified, payload, sortindex, expiry" if full else "id"
@@ -794,6 +818,7 @@ __all__ = [
     "DEFAULT_LIMIT",
     "MAX_TTL",
     "SORTINGS",
+    "SORT_NONE",
     "TOMBSTONE",
     "BatchNotFound",
     "Bso",

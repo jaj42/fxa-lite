@@ -66,6 +66,34 @@ response with its body, credentials redacted. That pair — the browser saying
 what it sent and the server saying what it made of it — is what most of
 [phase 8](flows.md) was.
 
+## Where each client files the other's records
+
+Sync moves records; it does not move the shelf they sit on. Both browsers keep
+their *own* things in the place you expect and the *other* device's things
+somewhere separate, and every report this project has had of "one-way sync" has
+so far been that separation rather than the wire.
+
+**Desktop bookmarks on Android.** Firefox for Android roots its bookmark screen
+at the `mobile` folder, which is where bookmarks made on the phone go. Anything
+made on Desktop lives in `menu`, `toolbar` or `unfiled`, and the phone shows
+those under a **Desktop Bookmarks** entry — one level down, not in the list you
+land on. They are not missing.
+
+**Android tabs on Desktop.** Look in *Firefox View* (`about:firefoxview`) under
+*Tabs from other devices*, or open the **Synced Tabs** sidebar (View → Sidebar →
+Synced Tabs). On LibreWolf and other forks that ship Firefox View disabled, the
+sidebar is the one that will be there. Either way the phone has to appear in
+`about:preferences#sync` first: that list is the `clients` collection, and a
+device that is not in it has not uploaded anything for Desktop to show.
+
+**Desktop tabs on Android** are in the tab tray, under its own *Desktop tabs*
+heading, on the same principle.
+
+If something really is missing, the server can say so without guessing:
+`fxa-lite sync inspect` prints one line per collection with its record count and
+when it last changed, and `tabs` and `clients` are one record per device — so
+two devices that are both syncing are two rows, and one row is a real finding.
+
 ## Firefox for Android (Fenix)
 
 There is no `about:config`. The equivalent is behind the secret menu:

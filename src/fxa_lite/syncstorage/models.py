@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import errors
-from .store import SORTINGS, BsoQuery, Offset, quantize
+from .store import SORT_NONE, SORTINGS, BsoQuery, Offset, quantize
 
 # DIVERGENCE: bso-id-with-a-slash-unroutable — a record id containing `/` has no URL
 #   upstream: `extractors/bso_param.rs` splits the *raw* path on `/`, requires
@@ -152,7 +152,14 @@ def parse_query(params: Any) -> BsoQuery:
     newer = _timestamp(params, "newer")
     older = _timestamp(params, "older")
     sort = params.get("sort")
-    if sort is not None and sort not in SORTINGS:
+    if sort == SORT_NONE:
+        # `sort=none` is upstream's default variant, and it asks for no order.
+        # Normalising it to the absent case here rather than carrying the
+        # string is what keeps every comparison below — and `get_bsos`'s offset
+        # resumption — reading the way upstream's `Sorting::Newest | None` and
+        # `_` arms read, without a second spelling to remember.
+        sort = None
+    elif sort is not None and sort not in SORTINGS:
         # An unrecognised sort is not "no sort": the client asked for an order
         # and would page through the answer believing it got one.
         raise errors.bad_request()
