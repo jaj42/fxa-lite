@@ -1,3 +1,7 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 """`/v1/account/*` — create, sign in, look up, fetch keys, delete.
 
 The routes Firefox hits first, and the ones that decide whether it ever gets

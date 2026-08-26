@@ -1,8 +1,19 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 """Sphinx directive: render `UPSTREAM.toml` as the "what we read" chapter.
 
 `.. upstream-table::` prints one section per pinned checkout: where it is, the
-commit fxa-lite was read against, what was taken from it, and the paths that
-were actually read — each with the note `UPSTREAM.toml` writes above it.
+commit fxa-lite was read against, what was taken from it, and — for the tracked
+half — the paths that were actually read, each with the note `UPSTREAM.toml`
+writes above it.
+
+Both kinds of entry are rendered, and each says which it is rather than being
+grouped under a heading that a reader arriving at one entry would not see.  A
+`[[repo]]` is tracked: `scripts/upstream-diff.sh` follows its paths.  A
+`[[reference]]` was read once, is pinned so a claim can cite a commit, and
+carries no paths because nothing takes its diff.
 
 Those notes are the reason this reads the file twice.  `tomllib` gives the
 data and throws the comments away, and the comments are most of the value: a
@@ -60,9 +71,19 @@ def notes(raw: str) -> dict[tuple[str, str], str]:
     return collected
 
 
-def repository(repo: dict[str, Any], comments: dict[tuple[str, str], str]) -> list[nodes.Node]:
+#: What each kind of entry promises, said at the entry rather than in a heading
+#: the reader may have scrolled past.
+KINDS = {
+    "repo": "tracked — `upstream-diff.sh` follows the paths below",
+    "reference": "read once, pinned so a claim can cite it; not tracked, no paths",
+}
+
+
+def repository(
+    repo: dict[str, Any], comments: dict[tuple[str, str], str], kind: str
+) -> list[nodes.Node]:
     built: list[nodes.Node] = []
-    heading = nodes.rubric(classes=["upstream-repo"])
+    heading = nodes.rubric(classes=["upstream-repo", f"upstream-{kind}"])
     heading += nodes.Text(repo["dir"])
     built.append(heading)
 
@@ -72,6 +93,8 @@ def repository(repo: dict[str, Any], comments: dict[tuple[str, str], str]) -> li
         ("Branch", repo["branch"]),
         ("Commit", repo["commit"]),
         ("Read on", repo["date"]),
+        ("Licence", repo["license"]),
+        ("Kind", KINDS[kind]),
     ):
         field = nodes.field()
         field += nodes.field_name(text=label)
@@ -81,6 +104,8 @@ def repository(repo: dict[str, Any], comments: dict[tuple[str, str], str]) -> li
             paragraph += nodes.reference(value, value, refuri=value)
         elif label == "Commit":
             paragraph += nodes.literal(value, value)
+        elif label == "Kind":
+            paragraph += inline(value)
         else:
             paragraph += nodes.Text(value)
         body += paragraph
@@ -92,6 +117,9 @@ def repository(repo: dict[str, Any], comments: dict[tuple[str, str], str]) -> li
     took += nodes.strong(text="What was taken: ")
     took += inline(repo["took"])
     built.append(took)
+
+    if not repo.get("paths"):
+        return built
 
     items = nodes.bullet_list(classes=["upstream-paths"])
     for path in repo["paths"]:
@@ -121,8 +149,9 @@ class UpstreamTable(SphinxDirective):
         data = tomllib.loads(raw)
         comments = notes(raw)
         built: list[nodes.Node] = []
-        for repo in data["repo"]:
-            built.extend(repository(repo, comments))
+        for kind in ("repo", "reference"):
+            for repo in data.get(kind, []):
+                built.extend(repository(repo, comments, kind))
         return built
 
 

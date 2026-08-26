@@ -1,3 +1,7 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 """Session, key-fetch and friends: one 32-byte seed, three derived keys.
 
 `lib/tokens/token.js` expands the seed to 96 bytes and slices it into an `id`

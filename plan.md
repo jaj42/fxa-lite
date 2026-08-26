@@ -1916,6 +1916,99 @@ this in a minute, and there was no command that asked it. There is now.
 971 tests (was 953), `ruff check`, `ty check` and `sphinx-build -W` clean.
 
 
+### Phase 17 — the manifest, the bug report, and the licence ✅ done
+
+Three pieces of unfinished business that turned out to share a premise: `UPSTREAM.toml` is the
+only record of what fxa-lite read, and it was being asked to do three jobs at once.
+
+**The manifest had outgrown its purpose, and the fix was a split rather than a deletion.**
+Eleven checkouts with fifty-odd per-path notes, of which only `mozilla/fxa` and
+`syncstorage-rs` are functionality fxa-lite replicates — `upstream-diff.sh` asking whether
+`jwcrypto` has moved is noise. But deleting the other nine would have stripped the citation
+from every phase 13–16 finding, which is the provenance hole phase 7 exists to close. So
+`[[repo]]` now means *tracked* (paths, diffed, exactly two — `test_only_two_repositories_are_tracked`
+says so) and `[[reference]]` means *cited*: pinned so a claim can name a commit, no path list,
+never followed. 386 lines to 275.
+
+- **`test_every_checkout_is_pinned` was the test the request predicted would fail, and it did
+  not have to.** It now runs over both kinds. Narrowing what is *tracked* did not narrow what
+  is *recorded*, and keeping those two questions apart is the whole content of the split.
+  `test_pin_matches_the_checkout` also covers both, because a citation to a commit that does
+  not resolve is not a citation; only the rename checks are tracked-only, since nothing takes
+  a reference's diff.
+- `upstream-diff.sh` needed one fix rather than none: naming a reference on the command line
+  used to exit 2 with "no entry named", which is a lie about a fair question. It now says
+  which it is and lists what *is* tracked.
+- The per-path notes on `application-services` and `firefox-android` were not deleted but
+  relocated to `BUGS.md`, at the claims they support — which is where a reader can actually
+  check them, and is the argument for the split restated as a place.
+
+**`BUGS.md` — sixteen defects and risky defaults in the reference implementations.** `AUDIT.md`
+is fxa-lite's own findings; this is the list pointing the other way, one entry per finding in a
+shape that lifts into a tracker unedited. Six in `syncstorage-rs`, four in `mozilla/fxa`, three
+in `application-services`, three in Fenix/android-components.
+
+- **Re-reading every claim at its pin was the phase's real work, and it changed four of them.**
+  `strictScopeValidation` is narrower than remembered — custom `https` scopes throw
+  unconditionally twenty lines below, so the key-bearing scopes were never grantable and the
+  hole is the short scope namespace. FXA-1's stall is thirty seconds after each occurrence and
+  permanent only for a caller that retries inside that window, not the unconditional
+  never-lifting timer the phase-8 prose implied. FA-2's skipped dispatch is
+  `SyncAction.UpdateAccount`, not the `UpdateAccountState(Authenticated)` written down at the
+  time. And `do_append`'s missing filter is **MySQL only** — Postgres uses `ON CONFLICT` on the
+  full key and Spanner writes a keyed mutation — which turns "upstream has a bug" into the much
+  stronger "two of three backends get it right and the third is the one Sync runs on".
+- **One finding was withdrawn**, and it is written up as withdrawn. `sync15::fetch_incoming`
+  dropping the collection GET's `X-Last-Modified` looked like a window where a concurrent write
+  is skipped for good; the upload's `X-If-Unmodified-Since` is the same `info/collections`
+  value, so a concurrent write 412s the upload and `set_uploaded` never runs. A bug list with
+  nothing withdrawn from it has not been checked.
+- **Two findings came with upstream's own comment as the evidence**, which is the best kind.
+  `batch_commit.sql`'s `MAX_TTL` bind carries `// XXX:`; `shouldPropagate()` is documented as
+  returning "true if this exception should be re-thrown and eventually crash the app", with
+  "update this check" once crash reports arrive.
+- **The compounding chain is the finding worth having.** FXA-2 (a flag named for commands also
+  403s the device list) → FXA-1 (that 403 carries `retry-after: 30`) → AS-2 (the Rust client
+  maps every 403 to `Forbidden` and discards errno) → FA-3 + FA-1 (`Forbidden` is not on the
+  recoverable allow-list, and the caller's own `{ null }` handler cannot see it) → force-close.
+  Each link is defensible alone; together a server flipping a documented configuration flag
+  closes Firefox for Android. That is the general form of the rule phases 13–15 kept narrowing,
+  and it is now written down where it can be read without the plan.
+- **Checked against upstream head as well as the pin.** `upstream-diff.sh` reports five commits
+  since the two pins and none touches a file named in the report — recorded in `BUGS.md`,
+  because a bug report for something already fixed is worse than none. The pins are *not*
+  bumped, which is this repository's rule: a pin moves with the change or the note that answers
+  its diff, and neither exists yet.
+
+**The licence, which the manifest turned out to already contain the answer to.** The repository
+had no `LICENSE` and no `license` field, i.e. all-rights-reserved, which is not what a published
+project with a docs site means to say. **MPL-2.0**, and it is a conclusion rather than a
+preference:
+
+- Every entry that contributed anything is MPL-2.0. The entries under harder terms took
+  *nothing* — IronFox is AGPL-3.0, `jwcrypto` LGPL-3.0, `fxa-self-hosting` has no LICENSE at
+  all. Those `took = "nothing"` lines stopped being pedantry and became the argument, so
+  `license` is now a required key on every entry and `test_anything_taken_from_is_mpl` asserts
+  the split. Add a reference under harder terms and take something from it, and the suite fails
+  at the moment somebody needs to notice.
+- **A blanket MIT was never available.** MPL is file-level (§1.10, §3.1) and fxa-lite has real
+  Modifications — `oauth/scopes.py`, `auth/attached_clients.py`, the two content-server ES
+  modules, `tokenserver/tokenlib.py`, the transcribed email validator, the monogram SVG,
+  `deviceManagementClientIds`, the vectors and the conformance client. The split licence those
+  facts *do* permit (MPL on the ports, MIT on the rest) is refused: it buys a permissiveness
+  §3.3 mostly already grants a downstream Larger Work, and costs a per-file map that has to be
+  answered at every future edit.
+- Exhibit A goes on all 100 first-party source files rather than only the derived ones, because
+  a list of which files are Modifications is a thing that rots. `tests/test_license.py` pins the
+  text, the PEP 639 metadata, the notice on every file — and that it sits *below* a shebang,
+  since a notice above `#!` silently stops a script being executable. Verified by mutation:
+  stripping one header fails two tests.
+
+**Nothing under `src/` changed except the licence headers**, so no re-run against real Firefox
+is owed — worth saying, because every previous phase that touched `src/` owed one.
+
+1182 tests (was 971), `ruff check`, `ty check` and `sphinx-build -W` clean.
+
 ---
 
 ## Verification

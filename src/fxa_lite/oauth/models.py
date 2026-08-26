@@ -1,3 +1,7 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 """Request payloads for the OAuth tier, as the reference's joi schemas define them.
 
 Same conventions as `auth/models.py`: the field names are the wire's, and

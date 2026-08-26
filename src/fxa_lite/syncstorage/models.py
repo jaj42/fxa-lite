@@ -1,3 +1,7 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 """Reading a Sync 1.5 request: query string, headers, and BSO bodies.
 
 `syncserver/src/web/extractors/`.  This is the layer with the most protocol in

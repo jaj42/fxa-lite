@@ -1,3 +1,7 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 """Deciding what a client may have, and minting the tokens that say so.
 
 `lib/oauth/grant.js` plus `lib/oauth/jwt_access_token.js`, with one structural

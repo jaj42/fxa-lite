@@ -4,6 +4,10 @@ version = "0.1.0"
 description = "A slim, self-hosted Mozilla Accounts + Sync stack: one process, one SQLite file"
 readme = "README.md"
 requires-python = ">=3.12"
+# MPL-2.0 because every upstream fxa-lite took from is MPL-2.0, and several files
+# here are ports rather than independent work — see docs/provenance.md, Licensing.
+license = "MPL-2.0"
+license-files = ["LICENSE"]
 authors = [
     { name = "Jona JOACHIM", email = "jona@joachim.cc" }
 ]

@@ -20,11 +20,14 @@ that stretches the password in the browser and speaks the Firefox WebChannel),
 the Sync tokenserver, and Sync 1.5 storage — collections, records, batch
 uploads and conditional requests, behind fully verified HAWK signatures — and
 `UPSTREAM.toml`, which records the reference commits every protocol constant
-here was read against.
+here was read against — and, for the two upstreams fxa-lite tracks rather than
+merely cites, the paths a change would have to touch to matter.
 
 Phase 10 — the security audit — is done: `AUDIT.md` is the findings list and
 its triage, the fixes ship in the code, and what was accepted rather than fixed
-is written up under **Security** below.
+is written up under **Security** below. `BUGS.md` is the list pointing the other
+way: sixteen defects and risky defaults found in the reference implementations
+while reimplementing them, each re-read at the commit `UPSTREAM.toml` pins.
 
 Phase 11 shipped the container deliverables — `Dockerfile`, `docker-compose.yaml`
 with an opt-in `tls` profile, `deploy/nginx.conf.example` and a smoke script that
@@ -292,3 +295,14 @@ uv run sphinx-build -W -b html docs docs/_build/html
 `-W` because two of its chapters are generated from the tree — a
 `# DIVERGENCE:` marker that has lost a field, or a path in `UPSTREAM.toml` that
 upstream has renamed, should fail the build rather than publish a gap.
+
+## Licence
+
+[MPL-2.0](LICENSE) — the same licence as every upstream fxa-lite was written
+against. That is a conclusion and not a preference: everything taken from was
+MPL-2.0, the references under harder terms (IronFox is AGPL-3.0, `jwcrypto` is
+LGPL-3.0) had nothing taken from them, and several files here are ports rather
+than independent work, so a blanket MIT was never available. The reasoning is in
+[Provenance and divergences](https://jaj42.github.io/fxa-lite/provenance.html#licensing),
+the premises are the `license` and `took` fields in `UPSTREAM.toml`, and
+`tests/test_license.py` fails if the two stop agreeing.

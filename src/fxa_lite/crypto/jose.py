@@ -1,3 +1,7 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 """JOSE bits: base64url, JWK conversion, RS256 JWTs and compact JWE.
 
 Three things live here, and all three are small enough that implementing them

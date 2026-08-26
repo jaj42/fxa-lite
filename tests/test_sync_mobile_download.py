@@ -1,3 +1,7 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 """The one request shape every mobile download uses, driven over HTTP.
 
 Firefox for Android is not JavaScript: it embeds the Rust `sync15` crate, and

@@ -1,11 +1,20 @@
 #!/usr/bin/env bash
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 #
 # What has upstream done to the parts of it we implement, since we last looked?
 #
-# For every entry in UPSTREAM.toml, log the commits between the pinned commit and the current
-# remote head that touch one of the paths we actually read.  A log, not a diff: a protocol
-# change shows up as a commit touching `lib/crypto/`, and a thousand subscription commits show
-# up as nothing at all.
+# For every `[[repo]]` in UPSTREAM.toml, log the commits between the pinned commit and the
+# current remote head that touch one of the paths we actually read.  A log, not a diff: a
+# protocol change shows up as a commit touching `lib/crypto/`, and a thousand subscription
+# commits show up as nothing at all.
+#
+# Only the tracked half of the manifest is followed.  `[[reference]]` entries are pinned so a
+# claim can cite a commit — mostly the client on the other side of the wire — and fxa-lite does
+# not replicate them, so there is nothing to stay current with and no diff to take.  Naming one
+# on the command line says so rather than pretending it does not exist.
 #
 # Usage:  scripts/upstream-diff.sh [--no-fetch] [repo ...]
 #
@@ -41,25 +50,38 @@ for arg in "$@"; do
 done
 
 # TOML in, tab-separated shell food out.  The manifest is the single source of truth for the
-# path lists; re-typing them here is how the two drift apart.
-entries=$(python3 - "$manifest" <<'PY'
+# path lists; re-typing them here is how the two drift apart.  References come out first and
+# tagged, because the only thing this script does with one is explain why it is not following
+# it — an argument naming a reference is a fair question with a specific answer, not a typo.
+all=$(python3 - "$manifest" <<'PY'
 import sys, tomllib
 
 with open(sys.argv[1], "rb") as fh:
     manifest = tomllib.load(fh)
 
+for entry in manifest.get("reference", []):
+    print("\t".join(["#ref", entry["dir"]]))
 for repo in manifest["repo"]:
     print("\t".join([repo["dir"], repo["branch"], repo["commit"], *repo["paths"]]))
 PY
 ) || exit 2
 
+references=$(grep '^#ref' <<<"$all" | cut -f2)
+entries=$(grep -v '^#ref' <<<"$all")
+
 # A name that matches no entry is a typo, and silently logging nothing is how a typo goes
 # unnoticed until someone concludes the repository is current.
 for name in ${wanted[@]+"${wanted[@]}"}; do
-  cut -f1 <<<"$entries" | grep -qxF "$name" || {
-    echo "no entry named '$name' in UPSTREAM.toml" >&2
+  cut -f1 <<<"$entries" | grep -qxF "$name" && continue
+  if grep -qxF "$name" <<<"$references"; then
+    printf "%s is a [[reference]] in UPSTREAM.toml — pinned so a claim can cite a commit,\n" "$name" >&2
+    printf "not tracked for change, so there is no diff to take.  What it supports is written\n" >&2
+    printf "at the claim, in BUGS.md or under docs/.\n" >&2
+    printf "Tracked: %s\n" "$(cut -f1 <<<"$entries" | tr '\n' ' ')" >&2
     exit 2
-  }
+  fi
+  echo "no entry named '$name' in UPSTREAM.toml" >&2
+  exit 2
 done
 
 behind=0

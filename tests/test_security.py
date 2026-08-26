@@ -1,3 +1,7 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 """Phase 10: the audit's fixes, and pins under what it only confirmed.
 
 Two kinds of test live here.  The first half is the fixes — a body cap, a

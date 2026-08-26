@@ -1,3 +1,7 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 """A Python port of `fxa-auth-client`, deliberately independent of the server.
 
 Ports `lib/crypto.ts`, `lib/hawk.ts`, `lib/bearer.ts` and the parts of

@@ -1,3 +1,7 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 """The documentation build, and the two ways it is wired to the rest of the tree.
 
 Nothing here renders HTML — `sphinx-build -W` does that in CI, and repeating it

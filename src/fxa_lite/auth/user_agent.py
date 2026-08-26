@@ -1,3 +1,7 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 """Just enough User-Agent parsing to name a device.
 
 The reference runs a full UA database to fill `uaBrowser`, `uaOS` and friends,

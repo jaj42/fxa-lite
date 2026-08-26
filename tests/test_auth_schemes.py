@@ -1,3 +1,7 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 """Both Authorization schemes, and what happens when neither is usable.
 
 The load-bearing claim here is the one from the plan: HAWK MACs are parsed and

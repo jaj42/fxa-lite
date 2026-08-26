@@ -1,3 +1,7 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 """The content server: the pages Firefox opens and the assets they pull.
 
 There is no browser here, so what these tests can check is the contract the

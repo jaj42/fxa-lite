@@ -1,3 +1,7 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 """The browser crypto, pinned to the same vectors as the Python crypto.
 
 `content/assets/crypto.js` does the half of the onepw protocol that runs in the

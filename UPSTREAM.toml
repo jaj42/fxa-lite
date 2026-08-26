@@ -5,19 +5,36 @@
 # which is gitignored and untracked.  Without this file that provenance lives only on the
 # machine that did the reading, and a claim that cannot name its source is not a claim.
 #
-# Each entry pins one checkout to the commit fxa-lite was read against, and lists the paths
-# that were actually read — not the repository.  mozilla/fxa is a monorepo whose churn is
-# overwhelmingly subscriptions, Glean and the settings SPA, none of which we implement; the
-# point of the path list is that `scripts/upstream-diff.sh` shows a protocol change as a
-# handful of commits instead of two thousand irrelevant ones.
+# There are two kinds of entry, and the difference is what is being promised.
 #
-# Bump a pin only together with the code change, or the note, that answers its diff.  The file
-# then always means "fxa-lite is current with respect to this commit", never "this is where we
-# last happened to look".
+# `[[repo]]` is **tracked**: functionality fxa-lite replicates and has to stay current with.
+# There are exactly two, and `tests/test_upstream.py` says so — `mozilla/fxa` and
+# `mozilla-services/syncstorage-rs`.  These carry the paths that were actually read, not the
+# repository, because `mozilla/fxa` is a monorepo whose churn is overwhelmingly
+# subscriptions, Glean and the settings SPA, none of which we implement; the point of the
+# path list is that `scripts/upstream-diff.sh` shows a protocol change as a handful of
+# commits instead of two thousand irrelevant ones.  Bump a pin only together with the code
+# change, or the note, that answers its diff.  The entry then always means "fxa-lite is
+# current with respect to this commit", never "this is where we last happened to look".
+#
+# `[[reference]]` is **cited**: read once, to answer one question, and pinned so the answer
+# can name a commit rather than a repository.  Most of these are the other side of the wire —
+# what a client requires of the responses fxa-lite writes — and fxa-lite does not track them,
+# so they carry no path list and `upstream-diff.sh` does not follow them.  The evidence a
+# reference supports lives in `BUGS.md`, at the claim it supports, which is the only place a
+# reader can check it.  A reference that grows a path list is a repository somebody promoted
+# without arguing for it, and the tests refuse it.
+#
+# Every entry names its `license`.  That is not decoration: fxa-lite is MPL-2.0 because every
+# project it took from is MPL-2.0, and the entries whose terms would have constrained harder
+# — IronFox is AGPL-3.0, jwcrypto is LGPL-3.0, fxa-self-hosting has no LICENSE at all — are
+# exactly the ones whose `took` line says "nothing".  See `docs/provenance.md`, *Licensing*.
 #
 # `tests/test_upstream.py` asserts every path below still exists in its checkout, and skips
 # when `resources/` is absent.  Upstream renames files, and a stale path makes the diff *empty*
-# — which reads as "nothing changed", the one failure mode this file cannot survive.
+# — which reads as "nothing changed", the one failure mode this file cannot survive.  It also
+# asserts that every checkout under `resources/` appears here as one kind or the other: a
+# source nobody recorded is a source nobody can cite.
 
 [[repo]]
 dir = "fxa"
@@ -25,6 +42,7 @@ url = "https://github.com/mozilla/fxa"
 branch = "main"
 commit = "f87b36d0b92435869d2419993b1b5176b322b871"
 date = "2026-08-24"
+license = "MPL-2.0"
 took = "the onepw protocol and its KATs, token derivation, the accounts/OAuth/profile wire format, and the WebChannel handshake"
 paths = [
   # The client half of onepw — ported into tests/conformance/client.py — and its own test
@@ -115,6 +133,7 @@ url = "https://github.com/mozilla-services/syncstorage-rs"
 branch = "master"
 commit = "3f0f985cc92a72647a3a701da702a3d5f28d05df"
 date = "2026-08-21"
+license = "MPL-2.0"
 took = "tokenlib, the tokenserver exchange, Sync 1.5 storage semantics, and the HAWK verification we do run"
 paths = [
   # tokenlib: signing key, payload, token, derived secret.
@@ -137,250 +156,120 @@ paths = [
   "syncstorage-settings/src/lib.rs",
 ]
 
-[[repo]]
-dir = "fxa-selfhosting"
-url = "https://github.com/jackyzy823/fxa-selfhosting"
-branch = "master"
-commit = "200626f1e59243536cfa9518e2168ac21b9e2bed"
-date = "2026-08-21"
-took = "what self-hosting the real thing costs, and the explicit client prefs for when autoconfig misbehaves"
-paths = [
-  "docker-compose.tmpl.yml",
-  "config.yml.sample",
-  "init.sh",
-]
+# ---------------------------------------------------------------------------------------
+# Read once, pinned for citation.  Not tracked, not diffed, no path lists — see the header.
+# ---------------------------------------------------------------------------------------
 
-[[repo]]
-dir = "fxa-self-hosting"
-url = "https://github.com/michielbdejong/fxa-self-hosting"
-branch = "master"
-commit = "2343760c34197de7d7e6ec71118ce027a0e76e5a"
-date = "2016-05-13"
-took = "nothing — historical only, ten years stale, kept to show how long the problem has been unsolved"
-paths = [
-  "README.md",
-]
-
-[[repo]]
-dir = "python-jose"
-url = "https://github.com/mpdavis/python-jose"
-branch = "master"
-commit = "018b310ddb8b50dcfd09a0c152117835a21dd656"
-date = "2025-05-28"
-took = "nothing — evaluated at 3.5.0 and rejected; see plan.md, Decisions already made"
-paths = [
-  # ECDH-ES is in ALL but not SUPPORTED, and both directions gate on SUPPORTED.
-  "jose/jwe.py",
-  "jose/jws.py",
-  "jose/jwt.py",
-  # The pure-Python default backend, and the three dependencies that come with it.
-  "jose/backends",
-  "setup.py",
-  # 3.4.0 fixed CVE-2024-33663/33664; 3.5.0 is the last release.
-  "CHANGELOG.md",
-]
-
-[[repo]]
-dir = "joserfc"
-url = "https://github.com/authlib/joserfc"
-branch = "main"
-commit = "7facdee77fc8735ad88e586b31c5b0c940ee0a78"
-date = "2026-07-13"
-took = "nothing — evaluated at 1.7.4 in phase 9: it answers both questions yes and was still not adopted, see plan.md. Pinned at the release that was evaluated, not at head; a newer commit here answers no question fxa-lite is asking, so this entry's log is informational until somebody re-opens the question"
-paths = [
-  # RS256 and compact ECDH-ES+A256GCM both work against tests/vectors/jose.json
-  # unchanged, and `algorithms=` is a per-call argument on both.
-  "src/joserfc/jws.py",
-  "src/joserfc/jwe.py",
-  "src/joserfc/jwt.py",
-  # The concat KDF and the ECDH-ES agreement, which is the half python-jose could not do.
-  "src/joserfc/_rfc7518/derive_key.py",
-  "src/joserfc/_rfc7518/jwe_algs.py",
-  # Header validation: where the 1 KiB header cap and the `crit` handling live.
-  "src/joserfc/registry.py",
-  "src/joserfc/errors.py",
-  # One dependency, and it is `cryptography` — the python-jose objection does not apply.
-  "pyproject.toml",
-]
-
-[[repo]]
-dir = "jwcrypto"
-url = "https://github.com/latchset/jwcrypto"
-branch = "main"
-commit = "eb7c266d18d1a45abce420492d48a3d01d281916"
-date = "2026-06-24"
-took = "nothing — evaluated at 1.5.8 in phase 9 alongside joserfc, same outcome, and pinned at the evaluated release for the same reason"
-paths = [
-  "jwcrypto/jws.py",
-  "jwcrypto/jwe.py",
-  "jwcrypto/jwt.py",
-  # The registry of algorithms a token is allowed to name, and the default allow-list —
-  # the thing an `algorithms=` argument is compared against.
-  "jwcrypto/jwa.py",
-  "pyproject.toml",
-]
-
-[[repo]]
+# The client side of the wire.  Every Firefox for Android build embeds this crate, so what
+# it will and will not deserialise is a hard constraint on what fxa-lite may write, and
+# three household bug reports (phases 13, 14, 16) were closed by reading it rather than by
+# taking a trace.  The specific files and symbols are cited in BUGS.md at AS-1..AS-3 and in
+# docs/clients.md, which is where a reader can check them against this pin.
+[[reference]]
 dir = "application-services"
 url = "https://github.com/mozilla/application-services"
 branch = "main"
 commit = "7674e0cf977272c746eebee7c145c982e06cc6c4"
 date = "2026-08-25"
-took = "what Firefox for Android requires of the responses fxa-lite writes — the fxa-client Rust crate that every mobile build embeds, read after a phone that synced fine still offered to sign in; then, in phase 15, what that crate does with an empty Sync Debug field, which content-server paths it builds from a literal, and how sync15 fixes up a tokenserver URL; and in phase 16 the shape of a mobile *download* — which query a collection read actually carries, when the client decides not to send it at all, and where its high-water mark comes from"
-paths = [
-  # `ProfileResponse`: `avatar` is a plain `String`, so a profile document without
-  # the key fails to parse and the phone never learns its own address.  Also the
-  # home of every other response struct the mobile client deserialises.
-  "components/fxa-client/src/internal/http_client.rs",
-  # `get_profile` and its ETag cache — the caller of the above.
-  "components/fxa-client/src/internal/profile.rs",
-  # `userinfo_endpoint` comes from `.well-known/openid-configuration`, not from
-  # `fxa-client-configuration`; `normalize_token_server_url` strips a
-  # `/1.0/sync/1.5` suffix from the override, and `token_server_endpoint_url`
-  # falls back to `sync_tokenserver_base_url` when there is no override — half
-  # of phase 15's answer, the other half being sync15's `fixup_server_url`.
-  # It is also where the content-server paths the client builds from a literal
-  # live: `oauth/force_auth`, `pair`, `pair/supp`, `connect_another_device`.
-  "components/fxa-client/src/internal/config.rs",
-  # `begin_oauth_flow`: `authorization_endpoint` from discovery normally, and
-  # `oauth_force_auth_url()` — a literal, not a discovered value — whenever the
-  # account has a profile but no session token.  A 404 there is a phone that
-  # cannot re-authenticate, which is why `PAGE_PATHS` serves it.
-  "components/fxa-client/src/internal/oauth.rs",
-  # `StateV2.config`: the persisted account carries the server it signed in
-  # against, so `from_json` restores that and not the app's current settings.
-  "components/fxa-client/src/internal/state_persistence.rs",
-  # Where a failed `get_profile` lands the account: `AuthIssues`, not a retry.
-  "components/fxa-client/src/state_machine",
-  # `fixup_server_url`, and the unit test that pins it: the tokenserver URL is
-  # given `/1.0/sync/1.5` if it does not already end in it, whether it came
-  # from discovery or from a self-hoster's override.  That is why Fenix's
-  # *Custom Sync server* field is not needed — the answer to the first of
-  # phase 8's four questions, closed in phase 15.
-  "components/sync15/src/client/token.rs",
-  # `build_collection_request_url`: the whole vocabulary of a mobile collection
-  # read — `full=1` as a value, `ids` comma-joined, `older`, `newer`, and
-  # `sort` only ever alongside `limit`.  Also `Sync15ClientResponse::from_response`,
-  # where a 2xx without a parseable `X-Last-Modified` is a hard error, which is
-  # what makes that header load bearing on every storage route we serve.
-  "components/sync15/src/client/storage_client.rs",
-  # `synchronize_with_clients_engine`: download, then apply, then upload, in
-  # that order and within one engine.  That ordering is the deduction that
-  # closed phase 16 — a phone whose records reach the desktop has, by
-  # construction, already run its own download.  Also the two silent exits: a
-  # `get_collection_request` of `None` and a collection state of `None` both
-  # return `Ok(())` having fetched nothing.
-  "components/sync15/src/client/sync.rs",
-  # `LocalCollStateMachine`: `CollState.last_modified` is the *`info/collections`*
-  # value, not the engine's own mark and not the collection GET's header.
-  "components/sync15/src/client/coll_state.rs",
-  # `fetch_incoming` binds the GET's `X-Last-Modified` to `_timestamp` and drops
-  # it, which is why a record written between a phone's read and its own write
-  # is skipped for good.
-  "components/sync15/src/client/coll_update.rs",
-  # `CollectionRequest`/`RequestOrder`, and the comment that explains why `sort`
-  # travels with `limit`: "asking for the order of records only makes sense if
-  # you are limiting them".  There is no `offset` field, so the client cannot
-  # page — see the note at `get_bsos` in `syncstorage/store.py`.
-  "components/sync15/src/engine/request.rs",
-  # `Display for ServerTimestamp` is `self.0 as f64 / 1000.0`, so `newer=` is
-  # the shortest round-tripping form and not the two decimals `X-Last-Modified`
-  # always carries.  One instant, two spellings, both on the wire.
-  "components/sync15/src/server_timestamp.rs",
-  # `get_collection_request`: `since == server_timestamp` means the request is
-  # never made, and `LAST_SYNC_META_KEY` is written in `apply()` from that same
-  # `info/collections` value.  The bookmarks engine sends `full()` and
-  # `newer_than(since)` and nothing else.
-  "components/places/src/bookmark_sync/engine.rs",
-]
+license = "MPL-2.0"
+took = "what the mobile client requires of fxa-lite's responses: that `avatar` is present in a profile document at all, that a 403 is read as a status and never as an errno, which content-server paths it builds from a literal rather than from discovery, how it fixes up a tokenserver URL, and the exact shape of a mobile collection download — which query it carries, when it decides not to send one, and where its high-water mark comes from"
 
-# A full mozilla-central checkout, cloned while chasing a report that desktop
-# records were not reaching a phone.  It answered one question and it was a
-# negative: the Rust Sync client Fenix runs is *not* vendored here — there is no
-# `sync15` or `places` under `third_party/rust` — so the mobile side of that
-# investigation is `application-services` above, and Fenix's Kotlin is
-# `firefox-android` below.  Nothing in fxa-lite rests on this tree; it is pinned
-# because a checkout under `resources/` that the manifest does not describe is
-# exactly the provenance hole phase 7 exists to close, and "read and took
-# nothing" is a recorded answer where silence is not.
-[[repo]]
-dir = "firefox"
-url = "https://github.com/mozilla-firefox/firefox"
-branch = "main"
-commit = "39532fe5a7a63cf58953e0ce2e2e264c94313b12"
-date = "2026-08-26"
-took = "nothing — cloned in phase 16 to read Desktop's Sync engines and to check whether the Rust crates the phone runs are vendored alongside them. They are not, and Desktop was never the failing half; the entry records the look rather than a dependency"
-paths = [
-  # Desktop's Sync client, for contrast with the Rust one: this is where the
-  # collection reads that *do* carry `sort` and `limit` are built, and it is the
-  # half of the ecosystem fxa-lite had already been tested against.  Listed as
-  # the tree that was actually opened, so a rename shows up in the diff even
-  # though no constant was taken from it.
-  "services/sync/modules",
-]
-
-[[repo]]
-dir = "IronFox"
-url = "https://gitlab.com/ironfox-oss/IronFox"
-branch = "dev"
-commit = "b1bd8fa03466a5555ece638476722c6a36897640"
-date = "2026-08-25"
-took = "nothing — the fork the household's phone actually runs, kept because its patch set is the cheapest proof of which Fenix file does what: it patches by path against the Firefox monorepo"
-paths = [
-  # Names `components/menu/compose/header/MozillaAccountMenuItem.kt` as the menu
-  # item that renders either the address or "Sign in", and `AccountUiView.kt` as
-  # the settings screen's version of the same decision.
-  "patches/fenix-disable-sync-avatar-fetching.patch",
-]
-
-# Archived in June 2024: Fenix and android-components now live in the Firefox
-# monorepo, so this pin is the last state of a tree the phone no longer builds
-# from.  It is kept anyway, and its staleness stated rather than hidden, because
-# the two files that matter here — `Exceptions.kt` and `Utils.kt` — have carried
-# the same allow-list since long before the archive, and `scripts/upstream-diff.sh`
-# will report nothing for this repo forever.  Anything read from it that is load
-# bearing wants confirming against a handset or against mozilla-central; the
-# force-close it explains is confirmed by the phone having stopped crashing.
-[[repo]]
+# Fenix and android-components, archived in June 2024 — both now live in the Firefox
+# monorepo, so `upstream-diff.sh` would report nothing for this pin forever even if it
+# followed it.  Kept because the alternative is a claim about Kotlin with no checkout behind
+# it, and because the two files that carry the argument have held the same allow-list since
+# long before the archive.  Anything load bearing read from here wants re-checking against
+# mozilla-firefox/firefox below; BUGS.md FA-1..FA-3 say which files those are.
+[[reference]]
 dir = "firefox-android"
 url = "https://github.com/mozilla-mobile/firefox-android"
 branch = "main"
 commit = "fe8a71cd70ad5674abe1824fe11dc78372b736c2"
 date = "2024-06-17"
-took = "the Kotlin half of the answer to a force-close: which FxA errors android-components treats as recoverable, and which line of Fenix polls the route that raised one; and in phase 15 the Kotlin half of the Sync Debug fields — where the two preferences are read, and where a restored account stops reading them"
-paths = [
-  # `shouldPropagate()`: the allow-list of recoverable `FxaException`s, ending
-  # `else -> true`.  `Forbidden` is not on it and has no typealias here, which
-  # is why a 403 from /account/device/commands crashes the app rather than
-  # being swallowed the way the earlier 404 was.
-  "android-components/components/service/firefox-accounts/src/main/java/mozilla/components/service/fxa/Exceptions.kt",
-  # `handleFxaExceptions`, which asks `shouldPropagate()` before it decides
-  # anything — so the `default`/`handleErrorBlock` a caller passes never runs.
-  "android-components/components/service/firefox-accounts/src/main/java/mozilla/components/service/fxa/Utils.kt",
-  # `pollForCommands()`, the caller, and `refreshDevices()` next to it: the
-  # /account/devices then /account/device/commands pair seen in the server log.
-  "android-components/components/service/firefox-accounts/src/main/java/mozilla/components/service/fxa/FxaDeviceConstellation.kt",
-  # `authenticatedAccount()` returns the account for AuthenticationProblem as
-  # well as Authenticated — which is why the crash was not introduced by the
-  # profile fix, only made easy to reach.
-  "android-components/components/service/firefox-accounts/src/main/java/mozilla/components/service/fxa/manager/FxaAccountManager.kt",
-  # `SyncStoreSupport`: the early return that rendered a missing profile as
-  # "Sign in", which phase 13 read from a copy rather than from a checkout.
-  "android-components/components/service/firefox-accounts/src/main/java/mozilla/components/service/fxa/store/SyncStoreSupport.kt",
-  # `syncNow()`: `refreshDevices()` then `pollForCommands()`, inside
-  # `viewLifecycleOwner.lifecycleScope.launch` — the coroutine with no handler
-  # that the rethrown exception escapes from.  This is the *Sync now* button.
-  "fenix/app/src/main/java/org/mozilla/fenix/settings/account/AccountSettingsFragment.kt",
-  # The three files behind phase 15's answers about the Sync Debug fields.
-  # `FxaServer.config()` builds the `ServerConfig` from the two preferences and
-  # passes `overrideSyncTokenServer.ifEmpty { null }`, so an empty field is no
-  # override at all and discovery decides.
-  "fenix/app/src/main/java/org/mozilla/fenix/components/FxaServer.kt",
-  # `SyncDebugFragment`: editing either field reveals the *Quit application*
-  # preference, which is `exitProcess(0)`.  The app has to restart; it offers.
-  "fenix/app/src/main/java/org/mozilla/fenix/settings/SyncDebugFragment.kt",
-  # `StorageWrapper.account()`: saved state is `AccountOnDisk.Restored`, rebuilt
-  # from JSON whose persisted config carries its own server — which is why the
-  # preferences do nothing to an account that is already signed in.
-  "android-components/components/service/firefox-accounts/src/main/java/mozilla/components/service/fxa/AccountStorage.kt",
-]
+license = "MPL-2.0"
+took = "the Kotlin half of a force-close — which FxA errors android-components treats as recoverable, which line of Fenix polls the route that raised one, and the coroutine it is rethrown into with no handler — plus the early return that renders a signed-in account as 'Sign in', and where the Sync Debug preferences are read and where a restored account stops reading them"
+
+# A full mozilla-central checkout.  Cloned in phase 16 to read Desktop's Sync engines, and
+# it answered one question with a negative: the Rust crates the phone runs are not vendored
+# here, so the mobile side of that investigation is `application-services` above.  Phase 17
+# gave it a second job and a real one — the browser half of BUGS.md FXA-1 was originally
+# read at gecko-dev HEAD, unpinned, which plan.md phase 8 recorded as a provenance gap.
+# `services/common/hawkclient.sys.mjs`, `services/fxaccounts/FxAccountsClient.sys.mjs` and
+# `services/sync/modules/engines/clients.sys.mjs` are all here, so that gap is closed and
+# the claim now cites this commit.
+[[reference]]
+dir = "firefox"
+url = "https://github.com/mozilla-firefox/firefox"
+branch = "main"
+commit = "39532fe5a7a63cf58953e0ce2e2e264c94313b12"
+date = "2026-08-26"
+license = "MPL-2.0"
+took = "how Firefox Desktop's account client handles a `Retry-After` — the backoff it caches on any status and applies to every subsequent FxA request, which is what makes a permanently-disabled feature stall the whole client; and Desktop's Sync engines for contrast with the Rust ones, which took nothing but is the reason the tree was opened"
+
+# The fork the household's phone actually runs.  AGPL-3.0, and nothing is taken from it —
+# which is not pedantry: see the header, and docs/provenance.md, *Licensing*.  Its patch set
+# is the cheapest available proof of which Fenix file decides what, because it patches by
+# path against the Firefox monorepo.
+[[reference]]
+dir = "IronFox"
+url = "https://gitlab.com/ironfox-oss/IronFox"
+branch = "dev"
+commit = "b1bd8fa03466a5555ece638476722c6a36897640"
+date = "2026-08-25"
+license = "AGPL-3.0"
+took = "nothing — read only as a path index into Fenix, where its avatar patch names the menu item and the settings view that each decide between an address and 'Sign in'"
+
+# What self-hosting the real thing costs, which is the project's whole premise, and the
+# explicit per-service client prefs for when autoconfig misbehaves.
+[[reference]]
+dir = "fxa-selfhosting"
+url = "https://github.com/jackyzy823/fxa-selfhosting"
+branch = "master"
+commit = "200626f1e59243536cfa9518e2168ac21b9e2bed"
+date = "2026-08-21"
+license = "MPL-2.0"
+took = "the shape of a real deployment — MySQL, eight Redis hostnames, Firestore, an SMTP relay, nginx and a channelserver — and the explicit `identity.fxaccounts.*` prefs, plus both spellings of Fenix's two Sync Debug fields"
+
+# No LICENSE file, so all rights reserved by default.  Nothing is taken; only the README was
+# ever opened.  Kept to show how long the problem has been unsolved.
+[[reference]]
+dir = "fxa-self-hosting"
+url = "https://github.com/michielbdejong/fxa-self-hosting"
+branch = "master"
+commit = "2343760c34197de7d7e6ec71118ce027a0e76e5a"
+date = "2016-05-13"
+license = "none — no LICENSE file, all rights reserved"
+took = "nothing — historical only, ten years stale"
+
+# The three JOSE libraries, evaluated and none adopted.  Each is pinned at the release that
+# was read rather than at head: a newer commit answers no question fxa-lite is asking, so
+# these entries are informational until somebody reopens the question.  python-jose was
+# rejected in phase 0 (it cannot do ECDH-ES at all); joserfc and jwcrypto both answered
+# phase 9's two questions yes and were still not adopted, because nothing in `src/` decrypts
+# a JWE and the hostile-input surface a library would take over is about ninety lines.
+[[reference]]
+dir = "python-jose"
+url = "https://github.com/mpdavis/python-jose"
+branch = "master"
+commit = "018b310ddb8b50dcfd09a0c152117835a21dd656"
+date = "2025-05-28"
+license = "MIT"
+took = "nothing — evaluated at 3.5.0: ECDH-ES is in ALL but not SUPPORTED and both directions gate on SUPPORTED, its default backend is pure-Python crypto costing three dependencies, and 3.5.0 is the last release"
+
+[[reference]]
+dir = "joserfc"
+url = "https://github.com/authlib/joserfc"
+branch = "main"
+commit = "7facdee77fc8735ad88e586b31c5b0c940ee0a78"
+date = "2026-07-13"
+license = "BSD-3-Clause"
+took = "nothing — evaluated at 1.7.4: it answers both of phase 9's questions yes, cross-decrypts against tests/vectors/jose.json unchanged, and costs exactly one dependency, and was still not adopted"
+
+[[reference]]
+dir = "jwcrypto"
+url = "https://github.com/latchset/jwcrypto"
+branch = "main"
+commit = "eb7c266d18d1a45abce420492d48a3d01d281916"
+date = "2026-06-24"
+license = "LGPL-3.0"
+took = "nothing — evaluated at 1.5.8 alongside joserfc, same outcome; and LGPL-3.0, which would have been the first term in this file to constrain fxa-lite's own licence had it been adopted"

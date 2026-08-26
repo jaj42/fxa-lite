@@ -1,3 +1,7 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 """The OAuth server: clients, scopes, grants, and the keys that sign tokens.
 
 Upstream this was a separate service (`fxa-oauth-server`) that was merged into

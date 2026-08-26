@@ -1,3 +1,7 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 """Request tracing: what phase 8 needed a throwaway proxy to see.
 
 An access log line says a request was a 400.  It does not say which field was

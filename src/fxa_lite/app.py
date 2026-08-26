@@ -1,3 +1,7 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 """FastAPI assembly: routers, error rendering, lifespan.
 
 One app, one origin.  The accounts and OAuth APIs mount at `/v1` — the prefix
